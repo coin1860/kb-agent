@@ -4,16 +4,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 import pandas as pd
 
-# Mock settings
-# We need to set env var BEFORE importing settings to affect it
-# Or patch the settings object
+# Set environment variables BEFORE importing config/modules
+os.environ["KB_AGENT_LLM_API_KEY"] = "dummy_key"
+os.environ["KB_AGENT_LLM_BASE_URL"] = "http://dummy.url"
+
+# Import settings after env vars are set
 from kb_agent.config import settings
 
-# Since docs_path is a property now, we can't set it.
-# We must set index_path.
-# settings is a Pydantic model, but docs_path is a property.
-# We can set settings.index_path.
-
+# Since docs_path is a property dependent on index_path, we set index_path
 settings.index_path = Path("./test_docs")
 if os.path.exists("./test_docs"):
     shutil.rmtree("./test_docs")

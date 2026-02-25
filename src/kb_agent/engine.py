@@ -1,11 +1,13 @@
 import logging
 import json
 import re
+from pathlib import Path
 from typing import List, Dict, Any, Set
 from kb_agent.llm import LLMClient
 from kb_agent.tools.vector_tool import VectorTool
 from kb_agent.tools.grep_tool import GrepTool
 from kb_agent.tools.file_tool import FileTool
+from kb_agent.tools.graph_tool import GraphTool
 from kb_agent.security import Security
 from kb_agent.audit import log_audit, log_search, log_llm_response
 
@@ -18,6 +20,7 @@ class Engine:
         self.vector_tool = VectorTool()
         self.grep_tool = GrepTool()
         self.file_tool = FileTool()
+        self.graph_tool = GraphTool()
 
     def answer_query(self, user_query: str) -> str:
         """
@@ -29,22 +32,46 @@ class Engine:
         candidates = self._hybrid_search(user_query)
         logger.info(f"Initial candidates count: {len(candidates)}")
 
-        # 2. Autonomous Retry Logic
+        # 2. Autonomous Retry Logic & Graph Navigation
         if not candidates:
             log_audit("retry_logic", {"reason": "no_candidates", "original_query": user_query})
-            new_queries = self._generate_alternative_queries(user_query)
 
-            for q in new_queries:
-                log_audit("retry_search", {"query": q})
-                extra_candidates = self._hybrid_search(q)
-                candidates.extend(extra_candidates)
+            # 2a. Graph Navigation Strategy
+            # Extract potential entities from query
+            entities = re.findall(r'\[?([A-Z]+-\d+)\]?', user_query) # Basic Jira ID
+            # Also try simple words if no IDs? Maybe too noisy.
+
+            if entities:
+                logger.info("Grepping failed. Navigating Knowledge Graph...")
+                for entity in entities:
+                    related = self.graph_tool.get_related_nodes(entity)
+                    for r in related:
+                        node_id = r["node"]
+                        # If node is a file, add to candidates
+                        if node_id.endswith(".md"):
+                             candidates.append({
+                                 "id": node_id,
+                                 "score": 5.0, # Medium confidence
+                                 "full_path": node_id, # Graph stores relative paths usually? Need to resolve.
+                                 "summary_path": None,
+                                 "matches": [f"Graph Relation: {r['relation']} to {entity}"]
+                             })
+                             log_audit("graph_nav", {"from": entity, "to": node_id, "relation": r["relation"]})
+
+            # 2b. Query Expansion (Standard Retry)
+            if not candidates:
+                new_queries = self._generate_alternative_queries(user_query)
+                for q in new_queries:
+                    log_audit("retry_search", {"query": q})
+                    extra_candidates = self._hybrid_search(q)
+                    candidates.extend(extra_candidates)
 
             # De-duplicate
             candidates = self._deduplicate_candidates_list(candidates)
-            logger.info(f"Candidates after retry: {len(candidates)}")
+            logger.info(f"Candidates after retry/graph: {len(candidates)}")
 
         if not candidates:
-            return "I couldn't find any relevant documents in the knowledge base, even after trying alternative keywords."
+            return "I couldn't find any relevant documents in the knowledge base, even after trying alternative keywords and graph navigation."
 
         # 3. Decision (Heuristic + LLM)
         top_candidates = candidates[:5]
@@ -195,7 +222,9 @@ class Engine:
 
         for res in grep_results:
             path = res["file_path"]
-            filename = path.split("/")[-1]
+            # Fix cross-platform filename extraction
+            filename = Path(path).name
+
             if filename.endswith("-summary.md"):
                 base_id = filename.replace("-summary.md", "")
             elif filename.endswith(".md"):

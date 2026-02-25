@@ -52,3 +52,60 @@
 2026-02-25 20:08:22,895 - INFO - {"timestamp": "2026-02-25T20:08:22.895020", "action": "link_trace", "details": {"from": "DOC-1.md", "to": "LINK-999.md"}}
 2026-02-25 20:08:22,895 - INFO - Synthesizing answer with context length: 111
 2026-02-25 20:08:22,895 - INFO - {"timestamp": "2026-02-25T20:08:22.895343", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1.md\nContent:\nThis relates to [LINK-999].\n\nSource: LINK-999.md\nContent:\nContent...", "response_summary": "Final Answer", "full_response_length": 12}}
+2026-02-25 20:44:27,098 - INFO - {"timestamp": "2026-02-25T20:44:27.098535", "action": "start_query", "details": {"query": "What is the status of Project X?"}}
+2026-02-25 20:44:27,099 - INFO - Initial candidates count: 1
+2026-02-25 20:44:27,099 - INFO - LLM Decided files: ['DOC-1-summary.md']
+2026-02-25 20:44:27,100 - INFO - Synthesizing answer with context length: 52
+2026-02-25 20:44:27,100 - INFO - {"timestamp": "2026-02-25T20:44:27.100123", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1-summary.md\nContent:\nSummary content...\n\nQuestion: What is the status of Proje...", "response_summary": "The project is on track.", "full_response_length": 24}}
+2026-02-25 20:44:27,104 - INFO - {"timestamp": "2026-02-25T20:44:27.104266", "action": "start_query", "details": {"query": "Tricky query"}}
+2026-02-25 20:44:27,104 - INFO - Initial candidates count: 0
+2026-02-25 20:44:27,104 - INFO - {"timestamp": "2026-02-25T20:44:27.104618", "action": "retry_logic", "details": {"reason": "no_candidates", "original_query": "Tricky query"}}
+2026-02-25 20:44:27,105 - INFO - {"timestamp": "2026-02-25T20:44:27.105002", "action": "retry_search", "details": {"query": "new query"}}
+2026-02-25 20:44:27,105 - INFO - Candidates after retry/graph: 1
+2026-02-25 20:44:27,105 - INFO - LLM Decided files: ['DOC-2.md']
+2026-02-25 20:44:27,105 - INFO - Synthesizing answer with context length: 36
+2026-02-25 20:44:27,105 - INFO - {"timestamp": "2026-02-25T20:44:27.105654", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-2.md\nContent:\nContent...\n\nQuestion: Tricky query", "response_summary": "Found the answer.", "full_response_length": 17}}
+2026-02-25 20:44:27,110 - INFO - {"timestamp": "2026-02-25T20:44:27.110224", "action": "start_query", "details": {"query": "Query"}}
+2026-02-25 20:44:27,110 - INFO - Initial candidates count: 1
+2026-02-25 20:44:27,110 - INFO - LLM Decided files: ['DOC-1.md']
+2026-02-25 20:44:27,110 - INFO - {"timestamp": "2026-02-25T20:44:27.110753", "action": "link_trace", "details": {"from": "DOC-1.md", "to": "LINK-999.md"}}
+2026-02-25 20:44:27,110 - INFO - Synthesizing answer with context length: 111
+2026-02-25 20:44:27,111 - INFO - {"timestamp": "2026-02-25T20:44:27.110987", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1.md\nContent:\nThis relates to [LINK-999].\n\nSource: LINK-999.md\nContent:\nContent...", "response_summary": "Final Answer", "full_response_length": 12}}
+2026-02-25 20:48:36,229 - INFO - {"timestamp": "2026-02-25T20:48:36.229942", "action": "start_query", "details": {"query": "What is the status of Project X?"}}
+2026-02-25 20:48:36,230 - INFO - Initial candidates count: 1
+2026-02-25 20:48:36,230 - INFO - LLM Decided files: ['DOC-1-summary.md']
+2026-02-25 20:48:36,231 - INFO - Synthesizing answer with context length: 52
+2026-02-25 20:48:36,231 - INFO - {"timestamp": "2026-02-25T20:48:36.231644", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1-summary.md\nContent:\nSummary content...\n\nQuestion: What is the status of Proje...", "response_summary": "The project is on track.", "full_response_length": 24}}
+2026-02-25 20:48:36,235 - INFO - {"timestamp": "2026-02-25T20:48:36.235496", "action": "start_query", "details": {"query": "Tricky query"}}
+2026-02-25 20:48:36,235 - INFO - Initial candidates count: 0
+2026-02-25 20:48:36,235 - INFO - {"timestamp": "2026-02-25T20:48:36.235778", "action": "retry_logic", "details": {"reason": "no_candidates", "original_query": "Tricky query"}}
+2026-02-25 20:48:36,236 - INFO - {"timestamp": "2026-02-25T20:48:36.236085", "action": "retry_search", "details": {"query": "new query"}}
+2026-02-25 20:48:36,236 - INFO - Candidates after retry/graph: 1
+2026-02-25 20:48:36,236 - INFO - LLM Decided files: ['DOC-2.md']
+2026-02-25 20:48:36,236 - INFO - Synthesizing answer with context length: 36
+2026-02-25 20:48:36,236 - INFO - {"timestamp": "2026-02-25T20:48:36.236735", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-2.md\nContent:\nContent...\n\nQuestion: Tricky query", "response_summary": "Found the answer.", "full_response_length": 17}}
+2026-02-25 20:48:36,240 - INFO - {"timestamp": "2026-02-25T20:48:36.240495", "action": "start_query", "details": {"query": "Query"}}
+2026-02-25 20:48:36,240 - INFO - Initial candidates count: 1
+2026-02-25 20:48:36,240 - INFO - LLM Decided files: ['DOC-1.md']
+2026-02-25 20:48:36,241 - INFO - {"timestamp": "2026-02-25T20:48:36.241019", "action": "link_trace", "details": {"from": "DOC-1.md", "to": "LINK-999.md"}}
+2026-02-25 20:48:36,241 - INFO - Synthesizing answer with context length: 111
+2026-02-25 20:48:36,241 - INFO - {"timestamp": "2026-02-25T20:48:36.241311", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1.md\nContent:\nThis relates to [LINK-999].\n\nSource: LINK-999.md\nContent:\nContent...", "response_summary": "Final Answer", "full_response_length": 12}}
+2026-02-25 20:53:01,249 - INFO - {"timestamp": "2026-02-25T20:53:01.248876", "action": "start_query", "details": {"query": "What is the status of Project X?"}}
+2026-02-25 20:53:01,249 - INFO - Initial candidates count: 1
+2026-02-25 20:53:01,249 - INFO - LLM Decided files: ['DOC-1-summary.md']
+2026-02-25 20:53:01,249 - INFO - Synthesizing answer with context length: 52
+2026-02-25 20:53:01,249 - INFO - {"timestamp": "2026-02-25T20:53:01.249892", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1-summary.md\nContent:\nSummary content...\n\nQuestion: What is the status of Proje...", "response_summary": "The project is on track.", "full_response_length": 24}}
+2026-02-25 20:53:01,253 - INFO - {"timestamp": "2026-02-25T20:53:01.253736", "action": "start_query", "details": {"query": "Tricky query"}}
+2026-02-25 20:53:01,253 - INFO - Initial candidates count: 0
+2026-02-25 20:53:01,254 - INFO - {"timestamp": "2026-02-25T20:53:01.254059", "action": "retry_logic", "details": {"reason": "no_candidates", "original_query": "Tricky query"}}
+2026-02-25 20:53:01,254 - INFO - {"timestamp": "2026-02-25T20:53:01.254360", "action": "retry_search", "details": {"query": "new query"}}
+2026-02-25 20:53:01,254 - INFO - Candidates after retry/graph: 1
+2026-02-25 20:53:01,254 - INFO - LLM Decided files: ['DOC-2.md']
+2026-02-25 20:53:01,254 - INFO - Synthesizing answer with context length: 36
+2026-02-25 20:53:01,255 - INFO - {"timestamp": "2026-02-25T20:53:01.255029", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-2.md\nContent:\nContent...\n\nQuestion: Tricky query", "response_summary": "Found the answer.", "full_response_length": 17}}
+2026-02-25 20:53:01,259 - INFO - {"timestamp": "2026-02-25T20:53:01.259570", "action": "start_query", "details": {"query": "Query"}}
+2026-02-25 20:53:01,259 - INFO - Initial candidates count: 1
+2026-02-25 20:53:01,259 - INFO - LLM Decided files: ['DOC-1.md']
+2026-02-25 20:53:01,260 - INFO - {"timestamp": "2026-02-25T20:53:01.260063", "action": "link_trace", "details": {"from": "DOC-1.md", "to": "LINK-999.md"}}
+2026-02-25 20:53:01,260 - INFO - Synthesizing answer with context length: 111
+2026-02-25 20:53:01,260 - INFO - {"timestamp": "2026-02-25T20:53:01.260297", "action": "llm_interaction", "details": {"prompt_summary": "Context:\nSource: DOC-1.md\nContent:\nThis relates to [LINK-999].\n\nSource: LINK-999.md\nContent:\nContent...", "response_summary": "Final Answer", "full_response_length": 12}}

@@ -22,8 +22,10 @@ def run_indexing():
     # Lazy import to avoid early config checks failure
     from kb_agent.processor import Processor
     from kb_agent.connectors.local_file import LocalFileConnector
+    from kb_agent.graph.graph_builder import GraphBuilder
 
     processor = Processor(settings.index_path)
+    graph_builder = GraphBuilder(settings.source_docs_path, settings.index_path)
 
     # Read from SOURCE path
     connector = LocalFileConnector(settings.source_docs_path)
@@ -49,6 +51,12 @@ def run_indexing():
             count += 1
         except Exception as e:
             print(f"Failed to process {file_id}: {e}")
+
+    # Build Knowledge Graph
+    try:
+        graph_builder.build_graph()
+    except Exception as e:
+        print(f"Graph build failed: {e}")
 
     print(f"Indexing complete. Processed {count} documents.")
 

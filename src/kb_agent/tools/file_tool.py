@@ -6,24 +6,31 @@ import os
 class FileTool:
     def __init__(self):
         settings = config.settings
-        self.docs_path = settings.docs_path if settings else Path(".")
+        # We allow reading from source docs path (raw) and index path (processed/summaries)
+        self.allowed_paths = []
+        if settings:
+            if settings.source_docs_path:
+                self.allowed_paths.append(settings.source_docs_path.resolve())
+            if settings.index_path:
+                self.allowed_paths.append(settings.index_path.resolve())
 
     def read_file(self, file_path: str) -> Optional[str]:
         """
-        Reads a file from the docs directory.
+        Reads a file from the allowed directories.
         """
         try:
-            # Resolve relative paths against docs_path
-            path = Path(file_path)
-            if not path.is_absolute():
-                path = self.docs_path / path
+            path = Path(file_path).resolve()
 
-            # Basic security check: ensure path is within docs_path
-            # try:
-            #     path.relative_to(self.docs_path)
-            # except ValueError:
-            #     print(f"Access denied: {path} is outside docs directory.")
-            #     return None
+            # Security Check: Ensure path is within allowed directories
+            is_allowed = False
+            for allowed in self.allowed_paths:
+                if path.is_relative_to(allowed):
+                    is_allowed = True
+                    break
+
+            if not is_allowed:
+                print(f"Access denied: {path} is outside allowed directories.")
+                return None
 
             if not path.exists():
                 return None
