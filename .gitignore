@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.chroma/
+.kb_agent/
+audit.log
+test_docs/
+*.sqlite3
+.env
+.venv/

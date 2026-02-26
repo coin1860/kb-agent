@@ -1,2 +1,0 @@
-[console_scripts]
-kb-agent = kb_agent.cli:main
