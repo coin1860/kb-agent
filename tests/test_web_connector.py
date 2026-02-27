@@ -69,7 +69,7 @@ class TestWebConnector:
         mock_resp.apparent_encoding = "utf-8"
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("kb_agent.connectors.web_connector.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             results = connector.fetch_data("https://example.com/article")
 
         assert len(results) == 1
@@ -98,7 +98,7 @@ class TestWebConnector:
         mock_resp.apparent_encoding = "utf-8"
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("kb_agent.connectors.web_connector.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             results = connector.fetch_data("https://example.com/simple")
 
         assert len(results) == 1
@@ -108,7 +108,7 @@ class TestWebConnector:
 
     def test_fetch_data_network_error(self, connector):
         import requests as req
-        with patch("kb_agent.connectors.web_connector.requests.get",
+        with patch("requests.get",
                    side_effect=req.ConnectionError("DNS failed")):
             results = connector.fetch_data("https://nonexistent.example.com")
 
@@ -123,7 +123,7 @@ class TestWebConnector:
         mock_resp.apparent_encoding = "utf-8"
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("kb_agent.connectors.web_connector.requests.get", return_value=mock_resp) as mock_get:
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             connector.fetch_data("example.com")
             mock_get.assert_called_once()
             call_url = mock_get.call_args[0][0]
@@ -155,7 +155,7 @@ class TestWebConnector:
         mock_resp.apparent_encoding = "utf-8"
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("kb_agent.connectors.web_connector.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             results = connector.fetch_data("https://example.com")
 
         content = results[0]["content"]
