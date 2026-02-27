@@ -30,7 +30,7 @@ from kb_agent.tui import (
     KBAgentApp, CommandPalette, StatusBar, ChatInput,
     SettingsScreen, SLASH_COMMANDS, LOGO, WELCOME, HELP_TEXT,
 )
-from textual.widgets import RichLog, Input, Header, TextArea
+from textual.widgets import Markdown, Input, Header, TextArea
 
 
 def make_app():
@@ -49,7 +49,7 @@ class TestAppStartup:
     async def test_all_core_widgets_exist(self):
         app = make_app()
         async with app.run_test():
-            assert app.query_one("#chat-log", RichLog) is not None
+            assert app.query_one("#chat-log", Markdown) is not None
             assert app.query_one("#chat-input", ChatInput) is not None
             assert app.query_one("#cmd-palette", CommandPalette) is not None
             assert app.query_one("#status-bar", StatusBar) is not None
@@ -85,8 +85,8 @@ class TestWelcome:
     def test_logo_not_empty(self):
         assert len(LOGO) > 50
 
-    def test_logo_has_red_markup(self):
-        assert "[bold red]" in LOGO
+    def test_logo_has_markdown_block(self):
+        assert "```" in LOGO
 
     def test_welcome_has_author(self):
         assert "Shane H SHOU" in WELCOME

@@ -1,5 +1,5 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Input, RichLog, Button, Static, Label, TextArea
+from textual.widgets import Header, Input, Markdown, Button, Static, Label, TextArea
 from textual.message import Message
 from textual.containers import Container, Horizontal, Vertical, Grid
 from textual.screen import ModalScreen
@@ -10,6 +10,7 @@ from textual.reactive import reactive
 from datetime import datetime
 from pathlib import Path
 import os
+import asyncio
 
 from kb_agent.engine import Engine
 import kb_agent.config as config
@@ -349,48 +350,52 @@ class TipBar(Static):
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 LOGO = """\
-[bold red]  ██████╗ ████████╗███████╗    ██╗  ██╗██████╗[/bold red]
-[bold red] ██╔════╝ ╚══██╔══╝██╔════╝    ██║ ██╔╝██╔══██╗[/bold red]
-[bold red] ██║  ███╗   ██║   ███████╗    █████╔╝ ██████╔╝[/bold red]
-[bold red] ██║   ██║   ██║   ╚════██║    ██╔═██╗ ██╔══██╗[/bold red]
-[bold red] ╚██████╔╝   ██║   ███████║    ██║  ██╗██████╔╝[/bold red]
-[bold red]  ╚═════╝    ╚═╝   ╚══════╝    ╚═╝  ╚═╝╚═════╝[/bold red]
-[bold red]      █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/bold red]
-[bold red]     ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/bold red]
-[bold red]     ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/bold red]
-[bold red]     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/bold red]
-[bold red]     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/bold red]
-[bold red]     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/bold red]
+```
+  ██████╗ ████████╗███████╗    ██╗  ██╗██████╗
+ ██╔════╝ ╚══██╔══╝██╔════╝    ██║ ██╔╝██╔══██╗
+ ██║  ███╗   ██║   ███████╗    █████╔╝ ██████╔╝
+ ██║   ██║   ██║   ╚════██║    ██╔═██╗ ██╔══██╗
+ ╚██████╔╝   ██║   ███████║    ██║  ██╗██████╔╝
+  ╚═════╝    ╚═╝   ╚══════╝    ╚═╝  ╚═╝╚═════╝
+      █████╗  ██████╗ ███████╗███╗   ██╗████████╗
+     ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
+     ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║
+     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
+     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
+     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
+```
 """
 
 WELCOME = """\
-[dim]Enterprise Knowledge Retrieval[/dim]
-[dim]Hybrid search: grep + vector + knowledge graph + [bold]web scraping[/bold][/dim]
+*Enterprise Knowledge Retrieval*\n
+*Hybrid search: grep + vector + knowledge graph + **web scraping***\n
 
-[dim]Author:[/dim]  [bold]Shane H SHOU[/bold]
-[dim]GitHub:[/dim]  [link=https://github.com/coin1860/kb-agent]https://github.com/coin1860/kb-agent[/link]  ⭐ [italic]Star the repo if you find it useful![/italic]
+*Author:*  **Shane H SHOU**\n
+*GitHub:*  [https://github.com/coin1860/kb-agent](https://github.com/coin1860/kb-agent)  ⭐ _Star the repo if you find it useful!_\n
 
-[bold]ctrl+s[/bold] settings  [bold]ctrl+l[/bold] clear  [bold]ctrl+q[/bold] quit
-[yellow]●[/yellow] [dim]Type[/dim] [bold yellow]/[/bold yellow] [dim]to see commands[/dim]  [dim]|[/dim]  [dim]Paste a[/dim] [bold]URL[/bold] [dim]to analyze web content[/dim]  [dim]|[/dim]  [bold]Enter[/bold] [dim]send,[/dim] [bold]Shift+Enter[/bold] [dim]new line[/dim]
-[dim]────────────────────────────────────────[/dim]
+**ctrl+s** settings  **ctrl+l** clear  **ctrl+q** quit\n
+🟡 *Type* **/** *to see commands*  |  *Paste a* **URL** *to analyze web content*  |  **Enter** *send,* **Shift+Enter** *new line*
+___
 """
 
 HELP_TEXT = """\
-[bold cyan]Commands:[/bold cyan]
-  [bold yellow]/help[/bold yellow]       Show this message
-  [bold yellow]/settings[/bold yellow]   Configure API key & model
-  [bold yellow]/clear[/bold yellow]      Clear chat
-  [bold yellow]/quit[/bold yellow]       Exit
+**Commands:**
+- **/help**       Show this message
+- **/settings**   Configure API key & model
+- **/clear**      Clear chat
+- **/quit**       Exit
 
-[bold cyan]Shortcuts:[/bold cyan]
-  [bold]Ctrl+Q[/bold] Quit   [bold]Ctrl+L[/bold] Clear   [bold]Ctrl+S[/bold] Settings
+**Shortcuts:**
+- **Ctrl+Q** Quit
+- **Ctrl+L** Clear
+- **Ctrl+S** Settings
 
-[bold cyan]Features:[/bold cyan]
-  • Type a question to search the knowledge base
-  • Paste a [bold]URL[/bold] to fetch & analyze web page content
-  • Type [bold yellow]/[/bold yellow] for command autocomplete
-  • [bold]Enter[/bold] to send, [bold]Shift+Enter[/bold] for new line
-[dim]────────────────────────────────────────[/dim]
+**Features:**
+- Type a question to search the knowledge base
+- Paste a **URL** to fetch & analyze web page content
+- Type **/** for command autocomplete
+- **Enter** to send, **Shift+Enter** for new line
+___
 """
 
 
@@ -482,6 +487,7 @@ class KBAgentApp(App):
 
     engine = None
     chat_mode: reactive[str] = reactive("knowledge_base")
+    chat_history: str = ""
     _suppress_palette = 0
 
     def compose(self) -> ComposeResult:
@@ -490,7 +496,7 @@ class KBAgentApp(App):
 
         # Chat messages area
         with Container(id="chat-area"):
-            yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
+            yield Markdown(id="chat-log")
 
         # Bottom panel: palette + editor + status
         with Vertical(id="bottom-panel"):
@@ -502,12 +508,12 @@ class KBAgentApp(App):
                 id="info-row",
             )
 
-    def on_mount(self):
-        log = self.query_one("#chat-log", RichLog)
+    async def on_mount(self):
+        log = self.query_one("#chat-log", Markdown)
 
         # Show logo + welcome on startup (no /help to keep it clean)
-        log.write(LOGO)
-        log.write(WELCOME)
+        self.chat_history = LOGO + "\n\n" + WELCOME + "\n\n"
+        await log.update(self.chat_history)
 
         if config.settings:
             self.sub_title = config.settings.llm_model
@@ -519,10 +525,9 @@ class KBAgentApp(App):
         if config.settings:
             try:
                 self.engine = Engine()
-                log.write("[green]● Engine ready[/green]")
+                self._append_to_chat("🟢 **Engine ready**\n\n")
             except Exception as e:
-                log.write(f"[yellow]⚠ Engine init: {e}[/yellow]")
-                log.write("[dim]Use /settings to configure[/dim]")
+                self._append_to_chat(f"⚠️ **Engine init: {e}**\n\n_Use /settings to configure_")
         else:
             self.set_timer(0.2, self._prompt_settings)
 
@@ -532,21 +537,39 @@ class KBAgentApp(App):
         ta = self.query_one("#chat-input", ChatInput)
         ta.focus()
 
+    def _append_to_chat(self, text: str):
+        self.chat_history += text
+        
+        def do_update():
+            # Use run_worker so the async _update_markdown is properly awaited within the app context
+            self.run_worker(self._update_markdown())
+
+        try:
+            self.call_from_thread(do_update)
+        except RuntimeError:
+            do_update()
+
+    async def _update_markdown(self):
+        log = self.query_one("#chat-log", Markdown)
+        await log.update(self.chat_history)
+        
+        container = self.query_one("#chat-area", Container)
+        container.scroll_end(animate=False)
+
     def _prompt_settings(self):
         self.push_screen(SettingsScreen(), self._on_settings_result)
 
     def _on_settings_result(self, result: bool):
-        log = self.query_one("#chat-log", RichLog)
         if result:
-            log.write("[green]● Settings saved[/green]")
+            self._append_to_chat("🟢 **Settings saved**\n\n")
             self.sub_title = config.settings.llm_model if config.settings else ""
             try:
                 self.engine = Engine()
-                log.write("[green]● Engine ready[/green]")
+                self._append_to_chat("🟢 **Engine ready**\n\n")
             except Exception as e:
-                log.write(f"[red]✗ Engine init failed: {e}[/red]")
+                self._append_to_chat(f"❌ **Engine init failed:** {e}\n\n")
         else:
-            log.write("[dim]Settings cancelled. Use /settings later.[/dim]")
+            self._append_to_chat("_Settings cancelled. Use /settings later._\n\n")
         self._refresh_status("idle")
         self.query_one("#chat-input", ChatInput).focus()
 
@@ -604,18 +627,17 @@ class KBAgentApp(App):
             return
 
         # Normal query
-        log = self.query_one("#chat-log", RichLog)
-        log.write(f"\n[dim]{self._ts()}[/dim]  [bold green]You[/bold green]  {query}")
+        self._append_to_chat(f"*{self._ts()}*  **👤 You**  \n{query}\n\n")
 
         if not self.engine:
             if config.settings is None:
-                log.write("[yellow]⚠ Not configured[/yellow]")
+                self._append_to_chat("⚠️ **Not configured**\n\n")
                 self.push_screen(SettingsScreen(), self._on_settings_result)
                 return
             try:
                 self.engine = Engine()
             except Exception as e:
-                log.write(f"[red]✗ Engine init failed: {e}[/red]")
+                self._append_to_chat(f"❌ **Engine init failed:** {e}\n\n")
                 return
 
         self._run_query(query)
@@ -656,9 +678,8 @@ class KBAgentApp(App):
 
     def _exec_slash(self, cmd_text: str):
         cmd = cmd_text.lower().split()[0]
-        log = self.query_one("#chat-log", RichLog)
         if cmd == "/help":
-            log.write(HELP_TEXT)
+            self._append_to_chat(HELP_TEXT + "\n\n")
         elif cmd == "/chatmode":
             self.action_open_chatmode()
         elif cmd == "/settings":
@@ -668,36 +689,26 @@ class KBAgentApp(App):
         elif cmd == "/quit":
             self.exit()
         else:
-            log.write(f"[red]Unknown command: {cmd}[/red]  [dim]Type /help[/dim]")
+            self._append_to_chat(f"❌ **Unknown command:** {cmd}  *Type /help*\n\n")
 
     # ─── Query Worker ─────────────────────────────────────────────────────
 
     @work(thread=True, exclusive=True)
     def _run_query(self, query: str):
-        log = self.query_one("#chat-log", RichLog)
-
         def on_status(emoji, msg):
-            self.call_from_thread(log.write, f"  [dim]{emoji} {msg}[/dim]")
+            # This is a bit tricky with full markdown updates.
+            # We can append it, but we might get status clutter.
+            # Let's just update the status bar for now to avoid chat history clutter.
             self.call_from_thread(self._refresh_status, "thinking", msg)
 
         self.call_from_thread(self._refresh_status, "thinking")
-        self.call_from_thread(log.write, "")
 
         try:
             response = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode)
-            self.call_from_thread(log.write, "")
-            self.call_from_thread(
-                log.write,
-                f"[dim]{self._ts()}[/dim]  [bold blue]Agent[/bold blue]",
-            )
-            for line in response.split("\n"):
-                self.call_from_thread(log.write, f"  {line}")
-            self.call_from_thread(
-                log.write, "[dim]────────────────────────────────────────[/dim]"
-            )
+            self._append_to_chat(f"*{self._ts()}*  **🤖 Agent**\n\n{response}\n\n___\n\n")
             self.call_from_thread(self._refresh_status, "idle")
         except Exception as e:
-            self.call_from_thread(log.write, f"\n[red]✗ Error: {e}[/red]")
+            self._append_to_chat(f"❌ **Error:** {e}\n\n")
             self.call_from_thread(self._refresh_status, "error", str(e))
 
     # ─── Actions ──────────────────────────────────────────────────────────
@@ -706,8 +717,8 @@ class KBAgentApp(App):
         self.exit()
 
     def action_clear_chat(self):
-        log = self.query_one("#chat-log", RichLog)
-        log.clear()
+        self.chat_history = ""
+        self.run_worker(self._update_markdown())
 
     def action_open_settings(self):
         self.push_screen(SettingsScreen(), self._on_settings_result)
@@ -724,9 +735,8 @@ class KBAgentApp(App):
     def _on_chatmode_result(self, mode: str):
         if mode:
             self.chat_mode = mode
-            log = self.query_one("#chat-log", RichLog)
             mode_name = "Normal Mode" if mode == "normal" else "Knowledge Base Mode"
-            log.write(f"\n[dim]{self._ts()}[/dim]  [green]● Switched to {mode_name}[/green]")
+            self._append_to_chat(f"*{self._ts()}*  🟢 **Switched to {mode_name}**\n\n")
             self._refresh_status("idle")
         
         ta = self.query_one("#chat-input", ChatInput)
