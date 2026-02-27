@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = Field(..., description="API Key for the LLM provider")
     llm_base_url: HttpUrl = Field(..., description="Base URL for the LLM API")
     llm_model: str = Field("gpt-4", description="Model name to use for chat completion")
-    embedding_model: str = Field("all-MiniLM-L6-v2", description="Embedding model name")
+    embedding_url: Optional[str] = Field("http://localhost:7999/v1", description="URL for the Embedding API, use HTTP format. Empty to use local models.")
+    embedding_model: Optional[str] = Field("all-MiniLM-L6-v2", description="Model name for embeddings. Useful if using an alternative embedding provider.")
 
     # Paths
     data_folder: Optional[Path] = Field(None, description="Base directory for kb-agent data")
@@ -37,9 +38,13 @@ class Settings(BaseSettings):
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
     https_proxy: Optional[HttpUrl] = Field(None, description="HTTPS Proxy URL")
 
-    # External Services (Optional for now, but good to have placeholders)
+    # External Services
     jira_url: Optional[HttpUrl] = Field(None, description="Jira Instance URL")
+    jira_email: Optional[str] = Field(None, description="Jira account email for API auth")
+    jira_token: Optional[SecretStr] = Field(None, description="Jira Personal Access Token / API Token")
     confluence_url: Optional[HttpUrl] = Field(None, description="Confluence Instance URL")
+    confluence_email: Optional[str] = Field(None, description="Confluence account email for API auth")
+    confluence_token: Optional[SecretStr] = Field(None, description="Confluence Personal Access Token / API Token")
 
     model_config = SettingsConfigDict(
         env_prefix="KB_AGENT_",

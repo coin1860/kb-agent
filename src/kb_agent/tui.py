@@ -24,7 +24,7 @@ from kb_agent.config import load_settings
 ENV_FILE = Path.home() / ".kb_agent" / ".env"
 
 
-def _save_env_file(api_key: str, base_url: str, model: str, data_folder: str = ""):
+def _save_env_file(api_key: str, base_url: str, model: str, data_folder: str = "", embedding_url: str = "", embedding_model: str = ""):
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f'KB_AGENT_LLM_API_KEY="{api_key}"',
@@ -33,14 +33,38 @@ def _save_env_file(api_key: str, base_url: str, model: str, data_folder: str = "
     ]
     if data_folder:
         lines.append(f'KB_AGENT_DATA_FOLDER="{data_folder}"')
+    if embedding_url:
+        lines.append(f'KB_AGENT_EMBEDDING_URL="{embedding_url}"')
+    if embedding_model:
+        lines.append(f'KB_AGENT_EMBEDDING_MODEL="{embedding_model}"')
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 env_key, _, _ = stripped.partition("=")
                 env_key = env_key.strip()
-                if env_key not in ("KB_AGENT_LLM_API_KEY", "KB_AGENT_LLM_BASE_URL", "KB_AGENT_LLM_MODEL", "KB_AGENT_DATA_FOLDER"):
+                if env_key not in ("KB_AGENT_LLM_API_KEY", "KB_AGENT_LLM_BASE_URL", "KB_AGENT_LLM_MODEL", "KB_AGENT_DATA_FOLDER", "KB_AGENT_EMBEDDING_URL", "KB_AGENT_EMBEDDING_MODEL"):
                     lines.append(stripped)
+    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _save_env_var(key: str, value: str):
+    """Save or update a single env var in the .env file."""
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    found = False
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                env_key, _, _ = stripped.partition("=")
+                if env_key.strip() == key:
+                    lines.append(f'{key}="{value}"')
+                    found = True
+                    continue
+            lines.append(line)
+    if not found:
+        lines.append(f'{key}="{value}"')
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -65,6 +89,7 @@ SLASH_COMMANDS = [
     ("/help", "Show available commands"),
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
+    ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
 ]
 
 
@@ -76,11 +101,11 @@ class SettingsScreen(ModalScreen[bool]):
     #settings-dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: auto auto auto auto auto auto;
+        grid-rows: auto auto auto auto auto auto auto auto auto;
         padding: 1 2;
         width: 70;
         height: auto;
-        max-height: 28;
+        max-height: 40;
         border: thick $primary 60%;
         background: $surface;
     }
@@ -112,6 +137,8 @@ class SettingsScreen(ModalScreen[bool]):
         current_model = config.settings.llm_model if config.settings else "gpt-4"
         current_data_folder = str(config.settings.data_folder) if config.settings and config.settings.data_folder else ""
         current_api_key = config.settings.llm_api_key.get_secret_value() if config.settings else ""
+        current_embedding_url = config.settings.embedding_url if config.settings else ""
+        current_embedding_model = config.settings.embedding_model if config.settings else ""
 
         with Grid(id="settings-dialog"):
             yield Label("⚙  Settings", id="settings-title")
@@ -131,6 +158,24 @@ class SettingsScreen(ModalScreen[bool]):
                 value=current_data_folder,
                 id="data_folder", classes="settings-input",
             )
+            yield Label("Embedding URL", classes="settings-label", id="lbl-embedding-url")
+            yield Input(
+                placeholder="http://localhost:7999/v1",
+                value=current_embedding_url,
+                id="embedding_url", classes="settings-input",
+            )
+            yield Label("Embedding Model", classes="settings-label", id="lbl-embedding-model")
+            yield Input(
+                placeholder="all-MiniLM-L6-v2",
+                value=current_embedding_model,
+                id="embedding_model", classes="settings-input",
+            )
+            yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
+            yield Input(
+                placeholder="1",
+                value=os.getenv("KB_AGENT_MAX_ITERATIONS", "1"),
+                id="max_iterations", classes="settings-input",
+            )
             with Horizontal(id="settings-buttons"):
                 yield Button("Save", id="save")
                 yield Button("Cancel", id="cancel")
@@ -141,6 +186,8 @@ class SettingsScreen(ModalScreen[bool]):
             base_url = self.query_one("#base_url").value.strip()
             model = self.query_one("#model_name").value.strip() or "gpt-4"
             data_folder = self.query_one("#data_folder").value.strip()
+            embedding_url = self.query_one("#embedding_url").value.strip()
+            embedding_model = self.query_one("#embedding_model").value.strip()
 
             if not api_key:
                 self.notify("API Key is required!", severity="error")
@@ -156,7 +203,26 @@ class SettingsScreen(ModalScreen[bool]):
             elif "KB_AGENT_DATA_FOLDER" in os.environ:
                 del os.environ["KB_AGENT_DATA_FOLDER"]
 
-            _save_env_file(api_key, base_url, model, data_folder)
+            if embedding_url:
+                os.environ["KB_AGENT_EMBEDDING_URL"] = embedding_url
+            elif "KB_AGENT_EMBEDDING_URL" in os.environ:
+                del os.environ["KB_AGENT_EMBEDDING_URL"]
+
+            if embedding_model:
+                os.environ["KB_AGENT_EMBEDDING_MODEL"] = embedding_model
+            elif "KB_AGENT_EMBEDDING_MODEL" in os.environ:
+                del os.environ["KB_AGENT_EMBEDDING_MODEL"]
+
+            # Max iterations (clamp 1-5)
+            max_iter_raw = self.query_one("#max_iterations").value.strip() or "1"
+            try:
+                max_iter = max(1, min(5, int(max_iter_raw)))
+            except ValueError:
+                max_iter = 1
+            os.environ["KB_AGENT_MAX_ITERATIONS"] = str(max_iter)
+            _save_env_var("KB_AGENT_MAX_ITERATIONS", str(max_iter))
+
+            _save_env_file(api_key, base_url, model, data_folder, embedding_url, embedding_model)
             if load_settings():
                 self.dismiss(True)
             else:
@@ -166,6 +232,110 @@ class SettingsScreen(ModalScreen[bool]):
 
 
 # ChatModeScreen removed.
+
+
+# ─── Web Engine Selection Modal ──────────────────────────────────────────────
+
+class WebEngineScreen(ModalScreen[str]):
+    """Modal for choosing the web fetch engine."""
+
+    selected_engine = reactive("markdownify")
+
+    CSS = """
+    WebEngineScreen { align: center middle; }
+    #web-engine-dialog {
+        padding: 1 2;
+        width: 50;
+        height: auto;
+        border: thick $primary 60%;
+        background: $surface;
+    }
+    #web-engine-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    .engine-option {
+        width: 100%;
+        padding: 1;
+    }
+    .engine-option:hover {
+        background: $accent;
+        color: auto;
+    }
+    .engine-option.active {
+        color: $success;
+        text-style: bold;
+    }
+    .engine-option.focused {
+        background: $accent;
+    }
+    """
+
+    def on_mount(self) -> None:
+        self.selected_engine = os.getenv("KB_AGENT_WEB_ENGINE", "markdownify").lower()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="web-engine-dialog"):
+            yield Label("🌐  Web Engine", id="web-engine-title")
+            
+            md_lbl = Label(id="engine-markdownify", classes="engine-option")
+            md_lbl.styles.content_align = ("left", "middle")
+            yield md_lbl
+            
+            cr_lbl = Label(id="engine-crawl4ai", classes="engine-option")
+            cr_lbl.styles.content_align = ("left", "middle")
+            yield cr_lbl
+
+    def watch_selected_engine(self, old_val: str, new_val: str) -> None:
+        try:
+            md_lbl = self.query_one("#engine-markdownify", Label)
+            cr_lbl = self.query_one("#engine-crawl4ai", Label)
+        except Exception:
+            return
+
+        current = os.getenv("KB_AGENT_WEB_ENGINE", "markdownify").lower()
+        
+        md_text = f"{'✅ ' if current == 'markdownify' else '   '}{'>> ' if new_val == 'markdownify' else '   '}markdownify (lightweight)"
+        md_lbl.update(md_text)
+        md_lbl.set_class(current == "markdownify", "active")
+        md_lbl.set_class(new_val == "markdownify", "focused")
+        
+        cr_text = f"{'✅ ' if current == 'crawl4ai' else '   '}{'>> ' if new_val == 'crawl4ai' else '   '}crawl4ai (Playwright, JS)"
+        cr_lbl.update(cr_text)
+        cr_lbl.set_class(current == "crawl4ai", "active")
+        cr_lbl.set_class(new_val == "crawl4ai", "focused")
+
+    @on(Key)
+    def handle_keys(self, event: Key) -> None:
+        if event.key == "up":
+            if self.selected_engine == "crawl4ai":
+                self.selected_engine = "markdownify"
+        elif event.key == "down":
+            if self.selected_engine == "markdownify":
+                self.selected_engine = "crawl4ai"
+        elif event.key == "enter":
+            self._save_and_dismiss(self.selected_engine)
+        elif event.key == "escape":
+            self.dismiss("")
+
+    def on_click(self, event) -> None:
+        widget = event.widget
+        if widget and widget.id == "engine-markdownify":
+            self._save_and_dismiss("markdownify")
+        elif widget and widget.id == "engine-crawl4ai":
+            self._save_and_dismiss("crawl4ai")
+        else:
+            self.dismiss("")
+
+    def _save_and_dismiss(self, engine: str):
+        if engine in ("markdownify", "crawl4ai"):
+            os.environ["KB_AGENT_WEB_ENGINE"] = engine
+            _save_env_var("KB_AGENT_WEB_ENGINE", engine)
+            self.notify(f"Web engine set to: {engine}", severity="information")
+            self.dismiss(engine)
+        else:
+            self.dismiss("")
 
 
 # ─── Command Palette ─────────────────────────────────────────────────────────
@@ -358,10 +528,11 @@ WELCOME = """\
 
 HELP_TEXT = """\
 [bold cyan]Commands:[/bold cyan]
-  [bold yellow]/help[/bold yellow]       Show this message
-  [bold yellow]/settings[/bold yellow]   Configure API key & model
-  [bold yellow]/clear[/bold yellow]      Clear chat
-  [bold yellow]/quit[/bold yellow]       Exit
+  [bold yellow]/help[/bold yellow]         Show this message
+  [bold yellow]/settings[/bold yellow]     Configure API key, model & max iterations
+  [bold yellow]/web_engine[/bold yellow]   Switch web engine (markdownify / crawl4ai)
+  [bold yellow]/clear[/bold yellow]        Clear chat
+  [bold yellow]/quit[/bold yellow]         Exit
 
 [bold cyan]Shortcuts:[/bold cyan]
   [bold]Ctrl+Q[/bold] Quit   [bold]Ctrl+L[/bold] Clear   [bold]Ctrl+S[/bold] Settings
@@ -371,6 +542,7 @@ HELP_TEXT = """\
   • Paste a [bold]URL[/bold] to fetch & analyze web page content
   • Type [bold yellow]/[/bold yellow] for command autocomplete
   • [bold]Enter[/bold] to send, [bold]Shift+Enter[/bold] for new line
+  • [bold]Tab[/bold] to toggle between RAG and Normal mode
 [dim]────────────────────────────────────────[/dim]
 """
 
@@ -607,7 +779,7 @@ class KBAgentApp(App):
             selected = palette.get_selected()
             palette.hide()
             if selected:
-                if selected == "/settings":
+                if selected in ("/settings", "/web_engine", "/clear", "/quit"):
                     ta.clear()
                     self._suppress_palette = 2
                     self._exec_slash(selected)
@@ -696,6 +868,8 @@ class KBAgentApp(App):
             self.action_open_settings()
         elif cmd == "/clear":
             self.action_clear_chat()
+        elif cmd == "/web_engine":
+            self.push_screen(WebEngineScreen())
         elif cmd == "/quit":
             self.exit()
         else:

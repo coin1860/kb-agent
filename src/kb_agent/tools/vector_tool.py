@@ -1,5 +1,6 @@
 import chromadb
 from chromadb.config import Settings
+import chromadb.utils.embedding_functions as embedding_functions
 import kb_agent.config as config
 from typing import List, Dict, Optional, Any
 import os
@@ -18,7 +19,18 @@ class VectorTool:
         self.client = chromadb.PersistentClient(path=persist_dir)
 
         # Get or create collection
-        self.collection = self.client.get_or_create_collection(name=collection_name)
+        ef = None
+        if settings and getattr(settings, "embedding_url", None):
+            ef = embedding_functions.OpenAIEmbeddingFunction(
+                api_key="dummy",
+                api_base=settings.embedding_url,
+                model_name=settings.embedding_model if hasattr(settings, "embedding_model") and settings.embedding_model else "text-embedding-ada-002"
+            )
+
+        if ef:
+            self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=ef)
+        else:
+            self.collection = self.client.get_or_create_collection(name=collection_name)
 
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
         """
