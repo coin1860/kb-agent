@@ -13,7 +13,16 @@ class LLMClient:
             api_key=settings.llm_api_key.get_secret_value(),
             base_url=str(settings.llm_base_url)
         )
-        self.model = settings.llm_model
+
+        # Sanitize model name for Groq compatibility
+        # Groq API expects just the model name without prefixes like 'groq-com/' or 'groq/'
+        model_name = settings.llm_model
+        if model_name.startswith("groq-com/"):
+            model_name = model_name.removeprefix("groq-com/")
+        elif model_name.startswith("groq/"):
+            model_name = model_name.removeprefix("groq/")
+
+        self.model = model_name
 
     def chat_completion(self, messages: list, temperature: float = 0.0) -> str:
         try:
