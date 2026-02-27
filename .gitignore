@@ -16,3 +16,4 @@ lib/
 share/
 include/
 pyvenv.cfg
+docs/
