@@ -10,6 +10,10 @@ from textual.reactive import reactive
 from datetime import datetime
 from pathlib import Path
 import os
+import re
+import subprocess
+from rich.markdown import Markdown
+from rich.padding import Padding
 
 from kb_agent.engine import Engine
 import kb_agent.config as config
@@ -20,19 +24,22 @@ from kb_agent.config import load_settings
 ENV_FILE = Path.home() / ".kb_agent" / ".env"
 
 
-def _save_env_file(api_key: str, base_url: str, model: str):
+def _save_env_file(api_key: str, base_url: str, model: str, data_folder: str = ""):
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f'KB_AGENT_LLM_API_KEY="{api_key}"',
         f'KB_AGENT_LLM_BASE_URL="{base_url}"',
         f'KB_AGENT_LLM_MODEL="{model}"',
     ]
+    if data_folder:
+        lines.append(f'KB_AGENT_DATA_FOLDER="{data_folder}"')
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                key = stripped.split("=", 1)[0]
-                if key not in ("KB_AGENT_LLM_API_KEY", "KB_AGENT_LLM_BASE_URL", "KB_AGENT_LLM_MODEL"):
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                env_key, _, _ = stripped.partition("=")
+                env_key = env_key.strip()
+                if env_key not in ("KB_AGENT_LLM_API_KEY", "KB_AGENT_LLM_BASE_URL", "KB_AGENT_LLM_MODEL", "KB_AGENT_DATA_FOLDER"):
                     lines.append(stripped)
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -54,7 +61,6 @@ _load_env_file()
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 
 SLASH_COMMANDS = [
-    ("/chatmode", "Select chat mode"),
     ("/clear", "Clear chat history"),
     ("/help", "Show available commands"),
     ("/quit", "Exit the application"),
@@ -70,11 +76,11 @@ class SettingsScreen(ModalScreen[bool]):
     #settings-dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: auto auto auto auto;
+        grid-rows: auto auto auto auto auto auto;
         padding: 1 2;
         width: 70;
         height: auto;
-        max-height: 22;
+        max-height: 28;
         border: thick $primary 60%;
         background: $surface;
     }
@@ -104,11 +110,13 @@ class SettingsScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         current_url = str(config.settings.llm_base_url) if config.settings else ""
         current_model = config.settings.llm_model if config.settings else "gpt-4"
+        current_data_folder = str(config.settings.data_folder) if config.settings and config.settings.data_folder else ""
+        current_api_key = config.settings.llm_api_key.get_secret_value() if config.settings else ""
 
         with Grid(id="settings-dialog"):
             yield Label("⚙  Settings", id="settings-title")
             yield Label("API Key", classes="settings-label", id="lbl-api-key")
-            yield Input(placeholder="sk-...", password=True, id="api_key", classes="settings-input")
+            yield Input(placeholder="sk-...", value=current_api_key, password=False, id="api_key", classes="settings-input")
             yield Label("Base URL", classes="settings-label", id="lbl-base-url")
             yield Input(
                 placeholder="https://api.openai.com/v1",
@@ -117,6 +125,12 @@ class SettingsScreen(ModalScreen[bool]):
             )
             yield Label("Model", classes="settings-label", id="lbl-model")
             yield Input(placeholder="gpt-4", value=current_model, id="model_name", classes="settings-input")
+            yield Label("Data Folder", classes="settings-label", id="lbl-data-folder")
+            yield Input(
+                placeholder="/path/to/data",
+                value=current_data_folder,
+                id="data_folder", classes="settings-input",
+            )
             with Horizontal(id="settings-buttons"):
                 yield Button("Save", id="save")
                 yield Button("Cancel", id="cancel")
@@ -126,6 +140,8 @@ class SettingsScreen(ModalScreen[bool]):
             api_key = self.query_one("#api_key").value.strip()
             base_url = self.query_one("#base_url").value.strip()
             model = self.query_one("#model_name").value.strip() or "gpt-4"
+            data_folder = self.query_one("#data_folder").value.strip()
+
             if not api_key:
                 self.notify("API Key is required!", severity="error")
                 return
@@ -135,7 +151,12 @@ class SettingsScreen(ModalScreen[bool]):
             os.environ["KB_AGENT_LLM_API_KEY"] = api_key
             os.environ["KB_AGENT_LLM_BASE_URL"] = base_url
             os.environ["KB_AGENT_LLM_MODEL"] = model
-            _save_env_file(api_key, base_url, model)
+            if data_folder:
+                os.environ["KB_AGENT_DATA_FOLDER"] = data_folder
+            elif "KB_AGENT_DATA_FOLDER" in os.environ:
+                del os.environ["KB_AGENT_DATA_FOLDER"]
+
+            _save_env_file(api_key, base_url, model, data_folder)
             if load_settings():
                 self.dismiss(True)
             else:
@@ -144,51 +165,7 @@ class SettingsScreen(ModalScreen[bool]):
             self.dismiss(False)
 
 
-class ChatModeScreen(ModalScreen[str]):
-    BINDINGS = [
-        Binding("up", "focus_previous", "Previous", show=False),
-        Binding("down", "focus_next", "Next", show=False),
-    ]
-
-    CSS = """
-    ChatModeScreen { align: center middle; }
-    #chatmode-dialog {
-        grid-size: 1;
-        grid-gutter: 1 2;
-        padding: 1 2;
-        width: 44;
-        height: auto;
-        border: thick $primary 60%;
-        background: $surface;
-    }
-    #chatmode-title {
-        text-align: center;
-        text-style: bold;
-        padding-bottom: 1;
-    }
-    .chatmode-btn {
-        width: 100%;
-        margin-bottom: 1;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="chatmode-dialog"):
-            yield Label("💬 Select Chat Mode", id="chatmode-title")
-            yield Button("Normal Mode", id="btn-normal", classes="chatmode-btn")
-            yield Button("Knowledge Base Mode", id="btn-kb", classes="chatmode-btn")
-            yield Button("Cancel", id="cancel", classes="chatmode-btn")
-
-    def on_mount(self) -> None:
-        self.query_one("#btn-normal").focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-kb":
-            self.dismiss("knowledge_base")
-        elif event.button.id == "btn-normal":
-            self.dismiss("normal")
-        else:
-            self.dismiss("")
+# ChatModeScreen removed.
 
 
 # ─── Command Palette ─────────────────────────────────────────────────────────
@@ -305,10 +282,12 @@ class StatusBar(Static):
         emoji, color, label = indicators.get(state, ("?", "white", state))
         info = f" {detail}" if detail else ""
         
-        mode_str = "[Normal]" if mode == "normal" else "[KB Area]"
+        mode_str = "Chat Mode" if mode == "normal" else "KB RAG Mode"
+        mode_color = "green" if mode == "normal" else "#FFB000"
+        
         model = ""
         if config.settings:
-            model = f"  │  {mode_str}  │  {config.settings.llm_model}"
+            model = f"  │  [{mode_color}]{mode_str}[/{mode_color}]  │  {config.settings.llm_model}"
         self.update(f" [{color}]{emoji}[/{color}] {label}{info}{model}")
 
 
@@ -327,6 +306,8 @@ class ShortcutBar(Static):
         self.update(
             "[bold]ctrl+s[/bold] settings  "
             "[bold]ctrl+l[/bold] clear  "
+            "[bold]shift+enter[/bold] newline  "
+            "[bold]tab[/bold] mode  "
             "[bold]ctrl+q[/bold] quit"
         )
 
@@ -371,7 +352,7 @@ WELCOME = """\
 [dim]GitHub:[/dim]  [link=https://github.com/coin1860/kb-agent]https://github.com/coin1860/kb-agent[/link]  ⭐ [italic]Star the repo if you find it useful![/italic]
 
 [bold]ctrl+s[/bold] settings  [bold]ctrl+l[/bold] clear  [bold]ctrl+q[/bold] quit
-[yellow]●[/yellow] [dim]Type[/dim] [bold yellow]/[/bold yellow] [dim]to see commands[/dim]  [dim]|[/dim]  [dim]Paste a[/dim] [bold]URL[/bold] [dim]to analyze web content[/dim]  [dim]|[/dim]  [bold]Enter[/bold] [dim]send,[/dim] [bold]Shift+Enter[/bold] [dim]new line[/dim]
+[yellow]●[/yellow] [dim]Type[/dim] [bold yellow]/[/bold yellow] [dim]to see commands[/dim]  [dim]|[/dim]  [bold]Tab[/bold] [dim]switch mode[/dim]  [dim]|[/dim]  [dim]Paste[/dim] [bold]URL[/bold] [dim]to analyze[/dim]  [dim]|[/dim]  [bold]Enter[/bold] [dim]send,[/dim] [bold]Shift+Enter[/bold] [dim]newline[/dim]
 [dim]────────────────────────────────────────[/dim]
 """
 
@@ -406,16 +387,21 @@ class ChatInput(TextArea):
             self.text = text
 
     async def _on_key(self, event: Key) -> None:
-        if event.key == "enter":
-            # Enter without shift = submit
-            # NOTE: Do NOT clear here — the handler needs to check
-            # palette state first (clearing triggers TextArea.Changed
-            # which would hide the palette before handler runs).
+        if event.key == "enter" and "shift" not in event.name:
+            # Plain Enter = Submit
             event.prevent_default()
             event.stop()
             self.post_message(self.Submitted(self.text))
             return
-        # All other keys (including shift+enter) go to TextArea default
+        
+        if event.key == "enter" and "shift" in event.name:
+            # Shift+Enter = Newline
+            self.insert("\n")
+            event.prevent_default()
+            event.stop()
+            return
+
+        # All other keys go to TextArea default
         await super()._on_key(event)
 
 
@@ -478,11 +464,30 @@ class KBAgentApp(App):
         padding: 0 2;
         margin-top: 0;
     }
+    #btn-copy {
+        height: 1;
+        min-width: 8;
+        padding: 0 1;
+        margin: 0 2;
+        background: $accent;
+        color: $text;
+        border: none;
+        display: none;
+    }
+    #btn-copy.visible {
+        display: block;
+    }
     """
 
     engine = None
     chat_mode: reactive[str] = reactive("knowledge_base")
+    last_response: reactive[str] = reactive("")
     _suppress_palette = 0
+    chat_history: list = []
+
+    def on_mount(self) -> None:
+        """Initialize per-instance state."""
+        self.chat_history = []
 
     def compose(self) -> ComposeResult:
         model_name = config.settings.llm_model if config.settings else "not configured"
@@ -499,8 +504,27 @@ class KBAgentApp(App):
                 yield ChatInput(id="chat-input", language=None, show_line_numbers=False)
             yield Horizontal(
                 StatusBar(id="status-bar"),
+                Button("Copy", id="btn-copy"),
                 id="info-row",
             )
+
+    def watch_last_response(self, value: str):
+        try:
+            btn = self.query_one("#btn-copy")
+            if value:
+                btn.add_class("visible")
+                if "```" in value:
+                    btn.label = "Copy Code"
+                else:
+                    btn.label = "Copy"
+            else:
+                btn.remove_class("visible")
+        except:
+            pass
+
+    @on(Button.Pressed, "#btn-copy")
+    def on_copy_pressed(self):
+        self.action_copy_last_response()
 
     def on_mount(self):
         log = self.query_one("#chat-log", RichLog)
@@ -583,7 +607,7 @@ class KBAgentApp(App):
             selected = palette.get_selected()
             palette.hide()
             if selected:
-                if selected in ("/settings", "/chatmode"):
+                if selected == "/settings":
                     ta.clear()
                     self._suppress_palette = 2
                     self._exec_slash(selected)
@@ -595,6 +619,7 @@ class KBAgentApp(App):
 
         query = event.text.strip()
         ta.clear()
+        self.last_response = ""
 
         if not query:
             return
@@ -605,7 +630,8 @@ class KBAgentApp(App):
 
         # Normal query
         log = self.query_one("#chat-log", RichLog)
-        log.write(f"\n[dim]{self._ts()}[/dim]  [bold green]You[/bold green]  {query}")
+        log.write(f"\n  [dim]{self._ts()}[/dim]  [bold green]You[/bold green]")
+        log.write(Padding(query, (0, 0, 0, 2)))
 
         if not self.engine:
             if config.settings is None:
@@ -624,6 +650,27 @@ class KBAgentApp(App):
 
     def on_key(self, event: Key):
         palette = self.query_one("#cmd-palette", CommandPalette)
+        
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            if palette.is_visible:
+                selected = palette.get_selected()
+                if selected:
+                    ta = self.query_one("#chat-input", ChatInput)
+                    palette.hide()
+                    if selected == "/settings":
+                        ta.clear()
+                        self._suppress_palette = 2
+                        self._exec_slash(selected)
+                    else:
+                        ta.clear()
+                        ta.insert(selected + " ")
+            else:
+                # Toggle chat mode
+                self.chat_mode = "normal" if self.chat_mode == "knowledge_base" else "knowledge_base"
+            return
+
         if not palette.is_visible:
             return
 
@@ -639,28 +686,12 @@ class KBAgentApp(App):
             palette.hide()
             event.prevent_default()
             event.stop()
-        elif event.key == "tab":
-            selected = palette.get_selected()
-            if selected:
-                ta = self.query_one("#chat-input", ChatInput)
-                palette.hide()
-                if selected in ("/settings", "/chatmode"):
-                    ta.clear()
-                    self._suppress_palette = 2
-                    self._exec_slash(selected)
-                else:
-                    ta.clear()
-                    ta.insert(selected + " ")
-            event.prevent_default()
-            event.stop()
 
     def _exec_slash(self, cmd_text: str):
         cmd = cmd_text.lower().split()[0]
         log = self.query_one("#chat-log", RichLog)
         if cmd == "/help":
             log.write(HELP_TEXT)
-        elif cmd == "/chatmode":
-            self.action_open_chatmode()
         elif cmd == "/settings":
             self.action_open_settings()
         elif cmd == "/clear":
@@ -684,14 +715,23 @@ class KBAgentApp(App):
         self.call_from_thread(log.write, "")
 
         try:
-            response = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode)
+            response = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode, history=self.chat_history)
+            
+            # Update history
+            self.chat_history.append({"role": "user", "content": query})
+            self.chat_history.append({"role": "assistant", "content": response})
+
             self.call_from_thread(log.write, "")
             self.call_from_thread(
                 log.write,
-                f"[dim]{self._ts()}[/dim]  [bold blue]Agent[/bold blue]",
+                f"  [dim]{self._ts()}[/dim]  [bold blue]Agent[/bold blue]",
             )
-            for line in response.split("\n"):
-                self.call_from_thread(log.write, f"  {line}")
+            # Render the entire response as Markdown with indentation
+            self.call_from_thread(log.write, Padding(Markdown(response), (0, 0, 0, 2)))
+            
+            # Set last response to enable Copy button
+            self.last_response = response
+            
             self.call_from_thread(
                 log.write, "[dim]────────────────────────────────────────[/dim]"
             )
@@ -708,9 +748,34 @@ class KBAgentApp(App):
     def action_clear_chat(self):
         log = self.query_one("#chat-log", RichLog)
         log.clear()
+        self.chat_history = []
+        log.write("[dim]Chat history cleared.[/dim]")
+        self.chat_history = []
+        log.write("[dim]Chat history cleared.[/dim]")
 
     def action_open_settings(self):
         self.push_screen(SettingsScreen(), self._on_settings_result)
+
+    def action_copy_last_response(self):
+        if not self.last_response:
+            return
+        
+        # Try to find code blocks
+        code_blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', self.last_response, re.DOTALL)
+        if code_blocks:
+            # Join all code blocks
+            text_to_copy = "\n\n".join(code_blocks)
+            msg = "Code copied to clipboard!"
+        else:
+            text_to_copy = self.last_response
+            msg = "Response copied to clipboard!"
+        
+        try:
+            # Simple pbcopy for Mac
+            subprocess.run(['pbcopy'], input=text_to_copy.encode('utf-8'), check=True)
+            self.notify(msg)
+        except Exception as e:
+            self.notify(f"Copy failed: {e}", severity="error")
 
     def action_select_all_input(self):
         """Select all text in the TextArea input."""
@@ -719,15 +784,35 @@ class KBAgentApp(App):
             ta.select_all()
 
     def action_open_chatmode(self):
-        self.push_screen(ChatModeScreen(), self._on_chatmode_result)
+        """Removed in favor of Tab switching."""
+        pass
 
     def _on_chatmode_result(self, mode: str):
         if mode:
             self.chat_mode = mode
-            log = self.query_one("#chat-log", RichLog)
-            mode_name = "Normal Mode" if mode == "normal" else "Knowledge Base Mode"
-            log.write(f"\n[dim]{self._ts()}[/dim]  [green]● Switched to {mode_name}[/green]")
+
+    def watch_chat_mode(self, mode: str):
+        """Update UI when chat mode changes."""
+        # Update border color of editor box
+        try:
+            box = self.query_one("#editor-box")
+            if mode == "normal":
+                box.styles.border = ("tall", "green")
+                self.query_one("#chat-input").styles.cursor_color = "white"
+            else:
+                box.styles.border = ("tall", "darkorange")
+                self.query_one("#chat-input").styles.cursor_color = "#FFB000"
+            
+            # Update status bar
             self._refresh_status("idle")
+            
+            # Log mode change
+            log = self.query_one("#chat-log", RichLog)
+            mode_name = "Chat Mode" if mode == "normal" else "KB RAG Mode"
+            c = "green" if mode == "normal" else "#FFB000"
+            log.write(f"\n[dim]{self._ts()}[/dim]  [{c}]● Switched to {mode_name}[/{c}]")
+        except:
+            pass
         
         ta = self.query_one("#chat-input", ChatInput)
         ta.focus()

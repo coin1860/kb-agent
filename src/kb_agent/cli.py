@@ -16,8 +16,11 @@ def run_indexing():
 
     print(f"Indexing documents from {settings.source_docs_path} to {settings.index_path}...")
 
-    # Ensure index path exists
+    import shutil
+    # Ensure index, source and archive paths exist before continuing
     os.makedirs(settings.index_path, exist_ok=True)
+    os.makedirs(settings.source_docs_path, exist_ok=True)
+    os.makedirs(settings.archive_path, exist_ok=True)
 
     # Lazy import to avoid early config checks failure
     from kb_agent.processor import Processor
@@ -40,6 +43,7 @@ def run_indexing():
 
     for doc in all_docs:
         file_id = doc["id"] # filename
+        source_path = doc.get("metadata", {}).get("path")
 
         # Skip summaries if they somehow exist in source (unlikely unless user copied them back)
         if "-summary.md" in file_id:
@@ -49,6 +53,15 @@ def run_indexing():
             print(f"Processing {file_id}...")
             processor.process(doc)
             count += 1
+            
+            # Archive the file
+            if source_path and os.path.exists(source_path):
+                dest_path = settings.archive_path / file_id
+                # If file already exists in archive, handle it (e.g., overwrite or suffix)
+                # Here we just move/overwrite for simplicity as per user request to avoid re-indexing
+                shutil.move(source_path, dest_path)
+                print(f"Archived {file_id} to {settings.archive_path}")
+
         except Exception as e:
             print(f"Failed to process {file_id}: {e}")
 

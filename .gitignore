@@ -1,3 +1,4 @@
+.pytest_cache/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -13,4 +14,5 @@ bin/
 build/
 lib/
 share/
+include/
 pyvenv.cfg

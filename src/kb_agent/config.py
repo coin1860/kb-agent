@@ -11,8 +11,20 @@ class Settings(BaseSettings):
     embedding_model: str = Field("all-MiniLM-L6-v2", description="Embedding model name")
 
     # Paths
+    data_folder: Optional[Path] = Field(None, description="Base directory for kb-agent data")
     source_docs_path: Path = Field(default=Path.home() / "data" / "markdown_docs", description="Path to read source markdown docs")
     index_path: Path = Field(default=Path.home() / ".kb_agent" / "index", description="Path to store processed/indexed docs")
+    archive_path: Path = Field(default=Path.home() / ".kb_agent" / "archive", description="Path to archive processed docs")
+
+    from pydantic import model_validator
+    
+    @model_validator(mode="after")
+    def compute_paths(self):
+        if self.data_folder:
+            self.source_docs_path = self.data_folder / "source"
+            self.index_path = self.data_folder / "index"
+            self.archive_path = self.data_folder / "archive"
+        return self
 
     # Backward compatibility alias
     @property

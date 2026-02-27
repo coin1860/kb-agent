@@ -29,7 +29,7 @@ class Engine:
         self.web_connector = WebConnector()
         self._docs_path = Path("docs")
 
-    def answer_query(self, user_query: str, on_status=None, mode: str = "knowledge_base") -> str:
+    def answer_query(self, user_query: str, on_status=None, mode: str = "knowledge_base", history: List[Dict[str, str]] = None) -> str:
         """
         Main entry point for the agent to answer a user query.
 
@@ -37,39 +37,85 @@ class Engine:
             user_query: The user's natural language question.
             on_status: Optional callback(emoji, message) for real-time progress updates.
             mode: Chat mode to use. Values: "knowledge_base" or "normal".
+            history: Optional list of previous messages in the conversation.
         """
         def _status(emoji, msg):
             if on_status:
                 on_status(emoji, msg)
 
         log_audit("start_query", {"query": user_query})
+        
+        history = history or []
 
         # 0. URL Detection — fetch, convert to markdown, process & answer
         urls = _URL_PATTERN.findall(user_query)
         if urls:
-            return self._handle_urls(user_query, urls, _status, mode=mode)
+            return self._handle_urls(user_query, urls, _status, mode=mode, history=history)
 
         if mode == "normal":
             _status("✨", "Generating answer...")
-            system_prompt = "You are a helpful assistant."
-            raw_response = self.llm.chat_completion([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ])
+            messages = [{"role": "system", "content": "You are a helpful assistant."}]
+            messages.extend(history)
+            messages.append({"role": "user", "content": user_query})
+            raw_response = self.llm.chat_completion(messages)
             log_llm_response(user_query, raw_response)
             return Security.mask_sensitive_data(raw_response)
 
-        # 1. Initial Search
-        _status("🔍", "Hybrid search: grep + vector...")
-        candidates = self._hybrid_search(user_query)
-        logger.info(f"Initial candidates count: {len(candidates)}")
-        _status("🔍", f"Found {len(candidates)} candidate(s)")
+        # 1. Smart Router: Decide whether to search the index or answer directly
+        _status("🧠", "Analyzing question...")
+        router_prompt = (
+            "You are an intelligent router for a Knowledge Base AI Agent. "
+            "Analyze the user's question and the conversation history. "
+            "If the question can be answered entirely using the provided conversation history without looking up new knowledge base documents, OR if the user is just saying a casual greeting (like 'hi', 'hello') or making a general conversational statement, you should answer directly. "
+            "Otherwise, you should search the knowledge base. If the question involves multiple distinct concepts, generate multiple queries. Keep queries to a few keywords each.\n"
+            "You MUST output raw JSON (no formatting blocks). Format exactly as one of the following:\n"
+            "Option A (Direct Answer): {\"action\": \"answer\"}\n"
+            "Option B (Search KB): {\"action\": \"search\", \"queries\": [\"keyword1 keyword2\", \"keyword3 keyword4\"]}"
+        )
+        
+        router_messages = [{"role": "system", "content": router_prompt}]
+        router_messages.extend(history)
+        router_messages.append({"role": "user", "content": user_query})
+        
+        import json
+        try:
+            router_response = self.llm.chat_completion(router_messages)
+            router_decision = json.loads(router_response.strip().strip('`').replace('json\n', ''))
+            action = router_decision.get("action", "search")
+            queries_to_run = router_decision.get("queries", [user_query])
+        except Exception as e:
+            logger.warning(f"Router failed to parse JSON: {e}. Defaulting to search.")
+            action = "search"
+            queries_to_run = [user_query]
+            
+        if action == "answer":
+            _status("✨", "Generating direct answer...")
+            system_prompt = (
+                "You are a helpful banking assistant. Answer the user's question based on the conversation history. "
+                "Be precise and professional."
+            )
+            ans_messages = [{"role": "system", "content": system_prompt}]
+            ans_messages.extend(history)
+            ans_messages.append({"role": "user", "content": user_query})
+            raw_response = self.llm.chat_completion(ans_messages)
+            log_llm_response(user_query, raw_response)
+            return Security.mask_sensitive_data(raw_response)
 
-        # 2. Autonomous Retry Logic & Graph Navigation
+        # 2. Multi-Query Hybrid Search
+        _status("🔍", f"Hybrid search with queries: {', '.join(queries_to_run)}")
+        candidates = []
+        for q in queries_to_run:
+            candidates.extend(self._hybrid_search(q))
+            
+        candidates = self._deduplicate_candidates_list(candidates)
+        logger.info(f"Initial pooled candidates count: {len(candidates)}")
+        _status("🔍", f"Found {len(candidates)} candidate(s) total")
+
+        # 3. Autonomous Retry Logic & Graph Navigation
         if not candidates:
             log_audit("retry_logic", {"reason": "no_candidates", "original_query": user_query})
 
-            # 2a. Graph Navigation Strategy
+            # 3a. Graph Navigation Strategy
             entities = re.findall(r'\[?([A-Z]+-\d+)\]?', user_query)
 
             if entities:
@@ -89,7 +135,7 @@ class Engine:
                              })
                              log_audit("graph_nav", {"from": entity, "to": node_id, "relation": r["relation"]})
 
-            # 2b. Query Expansion (Standard Retry)
+            # 3b. Query Expansion (Standard Retry)
             if not candidates:
                 _status("🔄", "Expanding query with alternative keywords...")
                 new_queries = self._generate_alternative_queries(user_query)
@@ -104,7 +150,7 @@ class Engine:
         if not candidates:
             return "I couldn't find any relevant documents in the knowledge base, even after trying alternative keywords and graph navigation."
 
-        # 3. Decision (Heuristic + LLM)
+        # 4. Decision (Heuristic + LLM)
         top_candidates = candidates[:5]
 
         _status("🤔", "Deciding which documents to read...")
@@ -125,7 +171,7 @@ class Engine:
              logger.warning("No files to read after decision and fallback.")
              return "I identified potential documents but decided none were relevant enough to read."
 
-        # 4. Read Content and Trace Links (Jira)
+        # 5. Read Content and Trace Links (Jira)
         context = []
         read_files = set()
         file_queue = list(files_to_read)
@@ -157,7 +203,7 @@ class Engine:
         # 5. Synthesize Answer
         _status("✨", "Generating answer...")
         system_prompt = (
-            "You are a helpful banking assistant. Answer the user's question based ONLY on the provided context. "
+            "You are a helpful banking assistant. Answer the user's question based ONLY on the provided context (and previous conversation if necessary to understand the context). "
             "If the context doesn't contain the answer, say so. "
             "Be precise and professional."
         )
@@ -165,10 +211,11 @@ class Engine:
 
         logger.info(f"Synthesizing answer with context length: {len(full_context)}")
 
-        raw_response = self.llm.chat_completion([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ])
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_prompt})
+
+        raw_response = self.llm.chat_completion(messages)
 
         log_llm_response(user_prompt, raw_response)
 
@@ -218,16 +265,17 @@ class Engine:
 
         _status("✨", "Generating answer from web content...")
         system_prompt = (
-            "You are a helpful assistant. Answer the user's question based on the web page content provided. "
+            "You are a helpful assistant. Answer the user's question based on the web page content provided (and previous conversation if necessary). "
             "If the content doesn't answer the question, summarize the key points of the page. "
             "Be concise and well-structured."
         )
         user_prompt = f"Web Content:\n{full_context[:8000]}\n\nQuestion: {question}"
 
-        raw_response = self.llm.chat_completion([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ])
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_prompt})
+
+        raw_response = self.llm.chat_completion(messages)
 
         log_llm_response(user_prompt, raw_response)
         return Security.mask_sensitive_data(raw_response)

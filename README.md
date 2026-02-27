@@ -130,7 +130,7 @@ The agent can be configured via environment variables. You can set these in your
 export KB_AGENT_LLM_API_KEY="your-api-key"
 export KB_AGENT_LLM_BASE_URL="https://api.openai.com/v1"  # Or your enterprise URL
 export KB_AGENT_LLM_MODEL="gpt-4"
-export KB_AGENT_SOURCE_DOCS_PATH="~/data/markdown_docs" # Where your raw docs are
+export KB_AGENT_DATA_FOLDER="~/data/kb-agent" # Where your source Docs and index are stored
 ```
 
 ---
@@ -147,10 +147,11 @@ kb-agent index
 ```
 
 This will:
-*   Read files from `KB_AGENT_SOURCE_DOCS_PATH`.
+*   Read files from `KB_AGENT_DATA_FOLDER/source`.
 *   Generate summaries using the LLM.
 *   Embed content into ChromaDB.
-*   Extract links and build the Knowledge Graph in `~/.kb_agent/index/knowledge_graph.json`.
+*   Extract links and build the Knowledge Graph in `KB_AGENT_DATA_FOLDER/index/knowledge_graph.json`.
+*   **Archive source files** to `KB_AGENT_DATA_FOLDER/archive` to prevent re-indexing.
 
 ### 2. Running the Agent (TUI)
 

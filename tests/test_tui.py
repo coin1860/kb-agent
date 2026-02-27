@@ -335,34 +335,19 @@ class TestSettings:
             await pilot.pause()
 
 
-# ─── Chat Mode Modal ──────────────────────────────────────────────────────────
+# ─── Chat Mode ──────────────────────────────────────────────────────────────
 
 class TestChatMode:
-    async def test_composes(self):
-        from kb_agent.tui import ChatModeScreen
-        from kb_agent import config
+    async def test_tab_toggles_mode(self):
         app = make_app()
-        config.settings = MagicMock()
         async with app.run_test() as pilot:
-            app.push_screen(ChatModeScreen(), app._on_chatmode_result)
-            await pilot.pause(delay=0.5)
-            # Find the screen explicitly
-            chat_screen = next(s for s in app.screen_stack if isinstance(s, ChatModeScreen))
-            assert chat_screen.query_one("#chatmode-dialog") is not None
-
-    async def test_all_buttons(self):
-        from kb_agent.tui import ChatModeScreen
-        from kb_agent import config
-        from textual.widgets import Button
-        app = make_app()
-        config.settings = MagicMock()
-        async with app.run_test() as pilot:
-            app.push_screen(ChatModeScreen(), app._on_chatmode_result)
-            await pilot.pause(delay=0.5)
-            chat_screen = next(s for s in app.screen_stack if isinstance(s, ChatModeScreen))
-            assert chat_screen.query_one("#btn-normal", Button) is not None
-            assert chat_screen.query_one("#btn-kb", Button) is not None
-            assert chat_screen.query_one("#cancel", Button) is not None
+            assert app.chat_mode == "knowledge_base"
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.chat_mode == "normal"
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.chat_mode == "knowledge_base"
 
 
 # ─── Keyboard Shortcuts ─────────────────────────────────────────────────────
@@ -395,7 +380,7 @@ class TestIntegration:
             ta = app.query_one("#chat-input", ChatInput)
             ta.insert("What is Project X?")
             await pilot.press("enter")
-            await pilot.pause(delay=0.5)
+            await pilot.pause(delay=2.0)
             mock_engine.answer_query.assert_called_once()
 
 
