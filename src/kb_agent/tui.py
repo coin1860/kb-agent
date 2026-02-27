@@ -537,19 +537,18 @@ class KBAgentApp(App):
         ta = self.query_one("#chat-input", ChatInput)
         ta.focus()
 
+    class AppendChat(Message):
+        def __init__(self, text: str):
+            super().__init__()
+            self.text = text
+
     def _append_to_chat(self, text: str):
-        self.chat_history += text
-        
-        def do_update():
-            # Use run_worker so the async _update_markdown is properly awaited within the app context
-            self.run_worker(self._update_markdown())
+        # post_message is thread-safe in Textual
+        self.post_message(self.AppendChat(text))
 
-        try:
-            self.call_from_thread(do_update)
-        except RuntimeError:
-            do_update()
-
-    async def _update_markdown(self):
+    @on(AppendChat)
+    async def _on_append_chat(self, event: AppendChat):
+        self.chat_history += event.text
         log = self.query_one("#chat-log", Markdown)
         await log.update(self.chat_history)
         
@@ -718,7 +717,7 @@ class KBAgentApp(App):
 
     def action_clear_chat(self):
         self.chat_history = ""
-        self.run_worker(self._update_markdown())
+        self.post_message(self.AppendChat(""))
 
     def action_open_settings(self):
         self.push_screen(SettingsScreen(), self._on_settings_result)
