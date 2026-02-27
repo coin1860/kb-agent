@@ -6,6 +6,8 @@ import json
 os.environ["KB_AGENT_LLM_API_KEY"] = "dummy"
 os.environ["KB_AGENT_LLM_BASE_URL"] = "http://dummy"
 
+import kb_agent.engine
+
 def test_engine_flow():
     with patch("kb_agent.engine.LLMClient") as MockLLM, \
          patch("kb_agent.engine.VectorTool") as MockVector, \
@@ -129,10 +131,28 @@ def test_engine_link_tracking():
         assert any("LINK-999" in c for c in calls)
         assert any("DOC-1" in c for c in calls)
 
+def test_engine_normal_mode():
+    with patch("kb_agent.engine.LLMClient") as MockLLM:
+        mock_llm = MockLLM.return_value
+        mock_llm.chat_completion.return_value = "Hello from normal mode!"
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        answer = engine.answer_query("hi", mode="normal")
+
+        assert "Hello from normal mode!" in answer
+        mock_llm.chat_completion.assert_called_once()
+        args, kwargs = mock_llm.chat_completion.call_args
+        messages = args[0]
+        assert messages[1]["content"] == "hi"
+
 if __name__ == "__main__":
     try:
         test_engine_flow()
         print("Flow test passed!")
+        test_engine_normal_mode()
+        print("Normal mode test passed!")
         test_engine_retry_flow()
         print("Retry test passed!")
         test_engine_link_tracking()

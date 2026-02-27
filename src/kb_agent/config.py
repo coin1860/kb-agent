@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="KB_AGENT_",
-        env_file=".env",
+        env_file=(".env", str(Path.home() / ".kb_agent" / ".env")),
         env_file_encoding="utf-8",
         extra="ignore"
     )

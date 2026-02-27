@@ -10,6 +10,11 @@ from kb_agent.tools.file_tool import FileTool
 from kb_agent.tools.graph_tool import GraphTool
 from kb_agent.security import Security
 from kb_agent.audit import log_audit, log_search, log_llm_response
+from kb_agent.connectors.web_connector import WebConnector
+from kb_agent.processor import Processor
+
+# Regex to detect URLs in user input
+_URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
 
 # Use the same logger name as configured in audit.py
 logger = logging.getLogger("kb_agent_audit")
@@ -21,38 +26,64 @@ class Engine:
         self.grep_tool = GrepTool()
         self.file_tool = FileTool()
         self.graph_tool = GraphTool()
+        self.web_connector = WebConnector()
+        self._docs_path = Path("docs")
 
-    def answer_query(self, user_query: str) -> str:
+    def answer_query(self, user_query: str, on_status=None, mode: str = "knowledge_base") -> str:
         """
         Main entry point for the agent to answer a user query.
+
+        Args:
+            user_query: The user's natural language question.
+            on_status: Optional callback(emoji, message) for real-time progress updates.
+            mode: Chat mode to use. Values: "knowledge_base" or "normal".
         """
+        def _status(emoji, msg):
+            if on_status:
+                on_status(emoji, msg)
+
         log_audit("start_query", {"query": user_query})
 
+        # 0. URL Detection — fetch, convert to markdown, process & answer
+        urls = _URL_PATTERN.findall(user_query)
+        if urls:
+            return self._handle_urls(user_query, urls, _status, mode=mode)
+
+        if mode == "normal":
+            _status("✨", "Generating answer...")
+            system_prompt = "You are a helpful assistant."
+            raw_response = self.llm.chat_completion([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ])
+            log_llm_response(user_query, raw_response)
+            return Security.mask_sensitive_data(raw_response)
+
         # 1. Initial Search
+        _status("🔍", "Hybrid search: grep + vector...")
         candidates = self._hybrid_search(user_query)
         logger.info(f"Initial candidates count: {len(candidates)}")
+        _status("🔍", f"Found {len(candidates)} candidate(s)")
 
         # 2. Autonomous Retry Logic & Graph Navigation
         if not candidates:
             log_audit("retry_logic", {"reason": "no_candidates", "original_query": user_query})
 
             # 2a. Graph Navigation Strategy
-            # Extract potential entities from query
-            entities = re.findall(r'\[?([A-Z]+-\d+)\]?', user_query) # Basic Jira ID
-            # Also try simple words if no IDs? Maybe too noisy.
+            entities = re.findall(r'\[?([A-Z]+-\d+)\]?', user_query)
 
             if entities:
+                _status("🕸️", f"Navigating Knowledge Graph for {', '.join(entities)}...")
                 logger.info("Grepping failed. Navigating Knowledge Graph...")
                 for entity in entities:
                     related = self.graph_tool.get_related_nodes(entity)
                     for r in related:
                         node_id = r["node"]
-                        # If node is a file, add to candidates
                         if node_id.endswith(".md"):
                              candidates.append({
                                  "id": node_id,
-                                 "score": 5.0, # Medium confidence
-                                 "full_path": node_id, # Graph stores relative paths usually? Need to resolve.
+                                 "score": 5.0,
+                                 "full_path": node_id,
                                  "summary_path": None,
                                  "matches": [f"Graph Relation: {r['relation']} to {entity}"]
                              })
@@ -60,13 +91,13 @@ class Engine:
 
             # 2b. Query Expansion (Standard Retry)
             if not candidates:
+                _status("🔄", "Expanding query with alternative keywords...")
                 new_queries = self._generate_alternative_queries(user_query)
                 for q in new_queries:
                     log_audit("retry_search", {"query": q})
                     extra_candidates = self._hybrid_search(q)
                     candidates.extend(extra_candidates)
 
-            # De-duplicate
             candidates = self._deduplicate_candidates_list(candidates)
             logger.info(f"Candidates after retry/graph: {len(candidates)}")
 
@@ -76,12 +107,11 @@ class Engine:
         # 3. Decision (Heuristic + LLM)
         top_candidates = candidates[:5]
 
+        _status("🤔", "Deciding which documents to read...")
         files_to_read = self._decide_files_to_read(user_query, top_candidates)
         logger.info(f"LLM Decided files: {files_to_read}")
 
-        # Fallback if LLM decision logic fails but we have strong candidates
         if not files_to_read and candidates:
-            # Read at least the top candidate's full content or summary
             top = candidates[0]
             if top.get("full_path"):
                 files_to_read.append(top["full_path"])
@@ -89,7 +119,6 @@ class Engine:
                 files_to_read.append(top["summary_path"])
             logger.info(f"Fallback added files: {files_to_read}")
 
-        # Deduplicate files_to_read
         files_to_read = list(set(files_to_read))
 
         if not files_to_read:
@@ -98,41 +127,35 @@ class Engine:
 
         # 4. Read Content and Trace Links (Jira)
         context = []
-        read_files = set() # Track what we read to avoid loops
+        read_files = set()
         file_queue = list(files_to_read)
-
-        # Regex for Jira-like IDs: [PROJ-123]
         JIRA_LINK_PATTERN = re.compile(r'\[([A-Z]+-\d+)\]')
-
         processed_count = 0
-        MAX_FILES = 5 # Safety limit to avoid context overflow
+        MAX_FILES = 5
 
         while file_queue and processed_count < MAX_FILES:
             file_path = file_queue.pop(0)
             if file_path in read_files:
                 continue
 
+            _status("📄", f"Reading {file_path}...")
             content = self.file_tool.read_file(file_path)
             if content:
                 read_files.add(file_path)
                 context.append(f"Source: {file_path}\nContent:\n{content}")
                 processed_count += 1
 
-                # Check for Jira Links in the content
                 links = JIRA_LINK_PATTERN.findall(content)
                 for link_id in links:
-                    # Assumption: Linked docs are stored as [ID].md
                     linked_doc_path = f"{link_id}.md"
-
-                    # Avoid re-queueing if already read or in queue
                     if linked_doc_path not in read_files and linked_doc_path not in file_queue:
-                        # Add to queue. BFS.
                         file_queue.append(linked_doc_path)
                         log_audit("link_trace", {"from": file_path, "to": linked_doc_path})
 
         full_context = "\n\n".join(context)
 
         # 5. Synthesize Answer
+        _status("✨", "Generating answer...")
         system_prompt = (
             "You are a helpful banking assistant. Answer the user's question based ONLY on the provided context. "
             "If the context doesn't contain the answer, say so. "
@@ -153,6 +176,61 @@ class Engine:
         final_response = Security.mask_sensitive_data(raw_response)
 
         return final_response
+
+    def _handle_urls(self, user_query: str, urls: List[str], _status, mode: str = "knowledge_base") -> str:
+        """Fetch URLs, convert to markdown, process, and answer."""
+        all_content = []
+
+        for url in urls:
+            _status("🌐", f"Fetching {url}...")
+            docs = self.web_connector.fetch_data(url)
+            for doc in docs:
+                if doc.get("metadata", {}).get("error"):
+                    all_content.append(f"Error fetching {url}: {doc['content']}")
+                    continue
+
+                if mode == "knowledge_base":
+                    # Process through the same pipeline as local/confluence/jira
+                    _status("📝", f"Processing content from {doc['title']}...")
+                    try:
+                        processor = Processor(self._docs_path)
+                        processor.process(doc)
+                        log_audit("web_fetch", {"url": url, "doc_id": doc["id"]})
+                    except Exception as e:
+                        logger.warning(f"Processor failed for {url}: {e}")
+                        # Even if processing fails, we still have the content
+
+                all_content.append(
+                    f"Source: {url}\nTitle: {doc['title']}\n\n{doc['content']}"
+                )
+
+        if not all_content:
+            return "Failed to fetch any content from the provided URL(s)."
+
+        full_context = "\n\n---\n\n".join(all_content)
+
+        # Strip the URL from user_query to get the actual question
+        question = user_query
+        for url in urls:
+            question = question.replace(url, "").strip()
+        if not question:
+            question = "Please summarize the content from the provided URL(s)."
+
+        _status("✨", "Generating answer from web content...")
+        system_prompt = (
+            "You are a helpful assistant. Answer the user's question based on the web page content provided. "
+            "If the content doesn't answer the question, summarize the key points of the page. "
+            "Be concise and well-structured."
+        )
+        user_prompt = f"Web Content:\n{full_context[:8000]}\n\nQuestion: {question}"
+
+        raw_response = self.llm.chat_completion([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+
+        log_llm_response(user_prompt, raw_response)
+        return Security.mask_sensitive_data(raw_response)
 
     def _hybrid_search(self, query: str) -> List[Dict[str, Any]]:
         grep_results = self.grep_tool.search(query)

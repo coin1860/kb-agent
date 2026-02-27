@@ -8,3 +8,9 @@ test_docs/
 *.sqlite3
 .env
 .venv/
+
+bin/
+build/
+lib/
+share/
+pyvenv.cfg
