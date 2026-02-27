@@ -398,6 +398,30 @@ class TestIntegration:
             await pilot.pause(delay=0.5)
             mock_engine.answer_query.assert_called_once()
 
+    async def test_query_with_engine_normal_mode(self):
+        """Verifies that normal mode behaves correctly when selected, and chat history updates."""
+        app = make_app()
+        async with app.run_test() as pilot:
+            mock_engine = MagicMock()
+            mock_engine.answer_query.return_value = "Normal response from AI"
+            app.engine = mock_engine
+
+            # Change mode to normal explicitly
+            app.chat_mode = "normal"
+
+            ta = app.query_one("#chat-input", ChatInput)
+            ta.insert("Hello Normal Mode")
+            await pilot.press("enter")
+            await pilot.pause(delay=0.5)
+            
+            mock_engine.answer_query.assert_called_once()
+            call_kwargs = mock_engine.answer_query.call_args[1]
+            assert call_kwargs.get("mode") == "normal"
+            
+            # Verify the response is appended to chat history appropriately 
+            # via the AppendChat asynchronous message handler correctly processing it
+            assert "Normal response from AI" in app.chat_history
+
 
 # ─── Unit Tests ──────────────────────────────────────────────────────────────
 

@@ -424,6 +424,12 @@ class ChatInput(TextArea):
         await super()._on_key(event)
 
 
+class AppendChat(Message):
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+
+
 # ─── Main App ────────────────────────────────────────────────────────────────
 
 class KBAgentApp(App):
@@ -537,17 +543,12 @@ class KBAgentApp(App):
         ta = self.query_one("#chat-input", ChatInput)
         ta.focus()
 
-    class AppendChat(Message):
-        def __init__(self, text: str):
-            super().__init__()
-            self.text = text
-
     def _append_to_chat(self, text: str):
         # post_message is thread-safe in Textual
-        self.post_message(self.AppendChat(text))
+        self.post_message(AppendChat(text))
 
     @on(AppendChat)
-    async def _on_append_chat(self, event: AppendChat):
+    async def on_append_chat(self, event: AppendChat):
         self.chat_history += event.text
         log = self.query_one("#chat-log", Markdown)
         await log.update(self.chat_history)
@@ -717,7 +718,7 @@ class KBAgentApp(App):
 
     def action_clear_chat(self):
         self.chat_history = ""
-        self.post_message(self.AppendChat(""))
+        self.post_message(AppendChat(""))
 
     def action_open_settings(self):
         self.push_screen(SettingsScreen(), self._on_settings_result)
