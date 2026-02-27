@@ -1,0 +1,24 @@
+{
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.pytest_cache": true,
+        "**/.venv": true,
+        "**/bin": true,
+        "**/build": true,
+        "**/lib": true,
+        "**/share": true,
+        "**/pyvenv.cfg": true,
+        "**/include": true
+    },
+    "search.exclude": {
+        "**/__pycache__": true,
+        "**/.pytest_cache": true,
+        "**/.venv": true,
+        "**/bin": true,
+        "**/build": true,
+        "**/lib": true,
+        "**/share": true,
+        "**/pyvenv.cfg": true,
+        "**/include": true
+    }
+}
