@@ -1,58 +1,194 @@
+"""
+Connector for fetching Jira issues via the REST API.
+
+Authentication: Basic auth using email + API token (Atlassian Cloud)
+                or Personal Access Token (Jira Server/Data Center).
+"""
+
+import logging
 import requests
-import os
 from typing import List, Dict, Any, Optional
+from markdownify import markdownify as md
+
 from .base import BaseConnector
 import kb_agent.config as config
 
+logger = logging.getLogger("kb_agent_audit")
+
+
 class JiraConnector(BaseConnector):
-    """
-    Connector for fetching Jira issues.
-    """
-    def __init__(self, base_url: str = None, api_key: str = None):
+    """Fetches Jira issues using the Jira REST API v2."""
+
+    def __init__(self, base_url: str = None, email: str = None, token: str = None):
         settings = config.settings
-        self.base_url = base_url or (str(settings.jira_url) if settings and settings.jira_url else "https://jira.example.com")
-        self.api_key = api_key or os.getenv("JIRA_API_KEY")
+
+        self.base_url = base_url
+        self.email = email
+        self.token = token
+
+        if settings:
+            if not self.base_url and settings.jira_url:
+                self.base_url = str(settings.jira_url).rstrip("/")
+            if not self.email and settings.jira_email:
+                self.email = settings.jira_email
+            if not self.token and settings.jira_token:
+                self.token = settings.jira_token.get_secret_value()
+
+    @property
+    def _is_configured(self) -> bool:
+        return bool(self.base_url and self.token)
+
+    def _auth(self):
+        """Return requests auth tuple. Cloud uses (email, token); Server uses Bearer."""
+        if self.email:
+            return (self.email, self.token)
+        # Server/DC with PAT — use token as password with empty user
+        return ("", self.token)
+
+    def _headers(self):
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    # ------------------------------------------------------------------
+    # fetch_data — single issue by key, or JQL search
+    # ------------------------------------------------------------------
 
     def fetch_data(self, query: str) -> List[Dict[str, Any]]:
         """
-        Fetches a specific Jira issue by key (e.g., "PROJ-123").
-        """
-        if not self.api_key:
-             # In a real scenario, raise or log warning. For this demo, maybe return mock data?
-             print("Jira API Key not set. Returning mock data.")
-             return self._mock_data(query)
+        Fetch Jira data.
 
-        url = f"{self.base_url}/rest/api/2/issue/{query}"
+        - If query looks like an issue key (e.g. PROJ-123) → fetch that issue.
+        - Otherwise → run a JQL text search.
+        """
+        if not self._is_configured:
+            logger.warning("Jira not configured (missing URL/token). Returning empty.")
+            return [{"id": query, "title": "Jira not configured",
+                     "content": "Jira URL or API token is not set. Please configure KB_AGENT_JIRA_URL and KB_AGENT_JIRA_TOKEN in .env.",
+                     "metadata": {"source": "jira", "error": True}}]
+
+        # Detect issue key pattern (e.g. ABC-123)
+        import re
+        if re.match(r'^[A-Z][A-Z0-9]+-\d+$', query.strip()):
+            return self._fetch_issue(query.strip())
+        else:
+            return self._search_jql(query)
+
+    def _fetch_issue(self, issue_key: str) -> List[Dict[str, Any]]:
+        """Fetch a single Jira issue by key."""
+        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+        params = {"expand": "renderedFields"}
+
         try:
-            response = requests.get(url, auth=("user", self.api_key))
-            if response.status_code == 200:
-                data = response.json()
-                return [{
-                    "id": data["key"],
-                    "title": data["fields"]["summary"],
-                    "content": data["fields"]["description"], # Basic description
-                    "metadata": {
-                        "source": "jira",
-                        "status": data["fields"]["status"]["name"],
-                        "priority": data["fields"]["priority"]["name"]
-                    }
-                }]
-            else:
-                print(f"Failed to fetch Jira issue {query}: {response.status_code}")
-                return []
-        except Exception as e:
-            print(f"Error fetching form Jira: {e}")
-            return []
+            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+                                params=params, timeout=15, verify=False)
+            if resp.status_code == 404:
+                return [{"id": issue_key, "title": f"Issue {issue_key} not found",
+                         "content": f"Jira issue {issue_key} does not exist.",
+                         "metadata": {"source": "jira", "error": True}}]
+
+            resp.raise_for_status()
+            data = resp.json()
+            return [self._format_issue(data)]
+
+        except requests.RequestException as e:
+            logger.error(f"Jira API error for {issue_key}: {e}")
+            return [{"id": issue_key, "title": f"Jira API error",
+                     "content": f"Failed to fetch {issue_key}: {e}",
+                     "metadata": {"source": "jira", "error": True}}]
+
+    def _search_jql(self, text: str) -> List[Dict[str, Any]]:
+        """Search Jira using JQL text search."""
+        url = f"{self.base_url}/rest/api/2/search"
+        jql = f'text ~ "{text}" ORDER BY updated DESC'
+        params = {
+            "jql": jql,
+            "maxResults": 5,
+            "fields": "summary,description,status,priority,assignee,reporter,"
+                      "issuetype,created,updated,labels,components",
+            "expand": "renderedFields",
+        }
+
+        try:
+            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+                                params=params, timeout=15, verify=False)
+            resp.raise_for_status()
+            data = resp.json()
+
+            results = []
+            for issue in data.get("issues", []):
+                results.append(self._format_issue(issue))
+            return results if results else [{
+                "id": "search",
+                "title": f"No Jira results for: {text}",
+                "content": f"JQL search '{jql}' returned 0 results.",
+                "metadata": {"source": "jira"},
+            }]
+
+        except requests.RequestException as e:
+            logger.error(f"Jira search error: {e}")
+            return [{"id": "search_error", "title": "Jira search error",
+                     "content": f"Failed to search Jira: {e}",
+                     "metadata": {"source": "jira", "error": True}}]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _format_issue(self, data: dict) -> Dict[str, Any]:
+        """Format a raw Jira issue JSON into our standard format."""
+        fields = data.get("fields", {})
+        rendered = data.get("renderedFields", {})
+
+        # Prefer rendered (HTML) description, convert to markdown
+        description = rendered.get("description") or fields.get("description") or ""
+        if "<" in description:  # looks like HTML
+            description = md(description, strip=["img"])
+
+        assignee = fields.get("assignee")
+        reporter = fields.get("reporter")
+        status = fields.get("status", {})
+        priority = fields.get("priority", {})
+        issuetype = fields.get("issuetype", {})
+        components = [c.get("name", "") for c in fields.get("components", [])]
+        labels = fields.get("labels", [])
+
+        # Build a rich content string
+        content_parts = [
+            f"# {data.get('key', '')} — {fields.get('summary', '')}",
+            "",
+            f"**Type:** {issuetype.get('name', 'Unknown')}",
+            f"**Status:** {status.get('name', 'Unknown')}",
+            f"**Priority:** {priority.get('name', 'Unknown')}",
+            f"**Assignee:** {assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'}",
+            f"**Reporter:** {reporter.get('displayName', 'Unknown') if reporter else 'Unknown'}",
+        ]
+        if labels:
+            content_parts.append(f"**Labels:** {', '.join(labels)}")
+        if components:
+            content_parts.append(f"**Components:** {', '.join(components)}")
+        content_parts.append(f"**Created:** {fields.get('created', '')}")
+        content_parts.append(f"**Updated:** {fields.get('updated', '')}")
+        content_parts.append("")
+        content_parts.append("## Description")
+        content_parts.append(description or "(No description)")
+
+        return {
+            "id": data.get("key", ""),
+            "title": fields.get("summary", ""),
+            "content": "\n".join(content_parts),
+            "metadata": {
+                "source": "jira",
+                "status": status.get("name", "Unknown"),
+                "priority": priority.get("name", "Unknown"),
+                "assignee": assignee.get("displayName", "") if assignee else "",
+                "type": issuetype.get("name", ""),
+                "labels": labels,
+                "url": f"{self.base_url}/browse/{data.get('key', '')}",
+            },
+        }
 
     def fetch_all(self) -> List[Dict[str, Any]]:
-        # fetching ALL Jira issues is generally not feasible without specific JQL.
-        # Maybe fetch recent issues?
+        """Not implemented — use fetch_data with JQL search instead."""
         return []
-
-    def _mock_data(self, issue_key: str) -> List[Dict[str, Any]]:
-        return [{
-            "id": issue_key,
-            "title": f"Mock Issue {issue_key}",
-            "content": f"This is a mock description for Jira issue {issue_key}.\n\nIt involves updating the login flow.",
-            "metadata": {"source": "jira", "status": "Open", "priority": "High"}
-        }]

@@ -30,7 +30,7 @@ from kb_agent.tui import (
     KBAgentApp, CommandPalette, StatusBar, ChatInput,
     SettingsScreen, SLASH_COMMANDS, LOGO, WELCOME, HELP_TEXT,
 )
-from textual.widgets import RichLog, Input, Header, TextArea
+from textual.widgets import RichLog, Input, Header, TextArea, Button
 
 
 def make_app():
@@ -331,7 +331,7 @@ class TestSettings:
         async with app.run_test() as pilot:
             app.push_screen(SettingsScreen(), app._on_settings_result)
             await pilot.pause(delay=0.5)
-            await pilot.click("#cancel")
+            app.screen.query_one("#cancel", Button).press()
             await pilot.pause()
 
 

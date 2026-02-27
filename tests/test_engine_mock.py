@@ -1,138 +1,27 @@
-from unittest.mock import patch, MagicMock
+"""
+Tests for Engine — the public API (post-LangGraph refactor).
+
+Validates that:
+- Knowledge Base mode delegates to the compiled LangGraph.
+- Normal mode uses direct LLM chat.
+- URL mode works unchanged.
+"""
+
 import os
 import json
+from unittest.mock import patch, MagicMock
 
-# Set dummy env vars for config before importing anything that uses settings
-os.environ["KB_AGENT_LLM_API_KEY"] = "dummy"
-os.environ["KB_AGENT_LLM_BASE_URL"] = "http://dummy"
+# Dummy env vars for config
+os.environ.setdefault("KB_AGENT_LLM_API_KEY", "dummy")
+os.environ.setdefault("KB_AGENT_LLM_BASE_URL", "http://dummy")
 
-import kb_agent.engine
 
-def test_engine_flow():
-    with patch("kb_agent.engine.LLMClient") as MockLLM, \
-         patch("kb_agent.engine.VectorTool") as MockVector, \
-         patch("kb_agent.engine.GrepTool") as MockGrep, \
-         patch("kb_agent.engine.FileTool") as MockFile:
+class TestEngineNormalMode:
+    """Normal (non-RAG) mode should bypass the graph and call LLMClient directly."""
 
-        # Setup mock instances
-        mock_llm = MockLLM.return_value
-        mock_vector = MockVector.return_value
-        mock_grep = MockGrep.return_value
-        mock_file = MockFile.return_value
-
-        # Configure tool outputs
-        mock_grep.search.return_value = [
-            {"file_path": "DOC-1.md", "content": "Project X status", "line": 10}
-        ]
-
-        mock_vector.search.return_value = [
-            {"id": "DOC-1-summary", "score": 0.5, "metadata": {"file_path": "DOC-1-summary.md", "related_file": "DOC-1.md", "type": "summary"}}
-        ]
-
-        # Configure LLM responses
-        # 1. Decision (which file to read)
-        # 2. Final Answer
-        mock_llm.chat_completion.side_effect = [
-            '[{"id": "DOC-1", "type": "summary"}]',
-            "The project is on track."
-        ]
-
-        mock_file.read_file.return_value = "Summary content..."
-
-        from kb_agent.engine import Engine
-        engine = Engine()
-
-        # Run
-        answer = engine.answer_query("What is the status of Project X?")
-
-        # Verify
-        assert "The project is on track" in answer
-        mock_grep.search.assert_called_once()
-        mock_vector.search.assert_called_once()
-        mock_file.read_file.assert_called()
-
-def test_engine_retry_flow():
-    with patch("kb_agent.engine.LLMClient") as MockLLM, \
-         patch("kb_agent.engine.VectorTool") as MockVector, \
-         patch("kb_agent.engine.GrepTool") as MockGrep, \
-         patch("kb_agent.engine.FileTool") as MockFile:
-
-        mock_llm = MockLLM.return_value
-        mock_vector = MockVector.return_value
-        mock_grep = MockGrep.return_value
-        mock_file = MockFile.return_value
-
-        # First attempt: No results
-        mock_grep.search.side_effect = [[], [{"file_path": "DOC-2.md", "content": "Found it", "line": 1}]]
-        mock_vector.search.side_effect = [[], []] # Second time also empty vector
-
-        # LLM sequence:
-        # 1. Generate alternative queries
-        # 2. Decision
-        # 3. Final Answer
-        mock_llm.chat_completion.side_effect = [
-            '["new query"]',
-            '[{"id": "DOC-2", "type": "full"}]',
-            "Found the answer."
-        ]
-
-        mock_file.read_file.return_value = "Content..."
-
-        from kb_agent.engine import Engine
-        engine = Engine()
-
-        answer = engine.answer_query("Tricky query")
-
-        assert "Found the answer" in answer
-        assert mock_grep.search.call_count == 2 # Initial + Retry
-
-def test_engine_link_tracking():
-    with patch("kb_agent.engine.LLMClient") as MockLLM, \
-         patch("kb_agent.engine.VectorTool") as MockVector, \
-         patch("kb_agent.engine.GrepTool") as MockGrep, \
-         patch("kb_agent.engine.FileTool") as MockFile:
-
-        mock_llm = MockLLM.return_value
-        mock_vector = MockVector.return_value
-        mock_grep = MockGrep.return_value
-        mock_file = MockFile.return_value
-
-        # Search returns "DOC-1"
-        mock_grep.search.return_value = []
-        mock_vector.search.return_value = [
-            {"id": "DOC-1", "score": 0.5, "metadata": {"file_path": "DOC-1.md", "type": "full"}}
-        ]
-
-        # Decision: Read DOC-1
-        mock_llm.chat_completion.side_effect = [
-            '[{"id": "DOC-1", "type": "full"}]', # Decision
-            "Final Answer"
-        ]
-
-        # File content logic
-        def read_file_side_effect(path):
-            if "DOC-1" in path: # Matches "DOC-1.md"
-                return "This relates to [LINK-999]."
-            if "LINK-999" in path: # Matches "LINK-999.md"
-                return "Content of linked document."
-            return None
-
-        mock_file.read_file.side_effect = read_file_side_effect
-
-        from kb_agent.engine import Engine
-        engine = Engine()
-
-        answer = engine.answer_query("Query")
-
-        # Verify read_file was called for LINK-999.md
-        # Inspect all calls to read_file
-        calls = [str(args[0]) for args, _ in mock_file.read_file.call_args_list]
-        print(f"Read files: {calls}")
-        assert any("LINK-999" in c for c in calls)
-        assert any("DOC-1" in c for c in calls)
-
-def test_engine_normal_mode():
-    with patch("kb_agent.engine.LLMClient") as MockLLM:
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_normal_mode_direct_llm(self, MockLLM, MockGraph):
         mock_llm = MockLLM.return_value
         mock_llm.chat_completion.return_value = "Hello from normal mode!"
 
@@ -143,21 +32,152 @@ def test_engine_normal_mode():
 
         assert "Hello from normal mode!" in answer
         mock_llm.chat_completion.assert_called_once()
+        # Graph should NOT be invoked
+        MockGraph.return_value.invoke.assert_not_called()
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_normal_mode_includes_history(self, MockLLM, MockGraph):
+        mock_llm = MockLLM.return_value
+        mock_llm.chat_completion.return_value = "Sure, continuing..."
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        history = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+
+        answer = engine.answer_query("Tell me more", mode="normal", history=history)
+
         args, kwargs = mock_llm.chat_completion.call_args
         messages = args[0]
-        assert messages[1]["content"] == "hi"
+        # system + 2 history + user message
+        assert len(messages) == 4
+        assert messages[0]["role"] == "system"
+        assert messages[-1]["content"] == "Tell me more"
 
-if __name__ == "__main__":
-    try:
-        test_engine_flow()
-        print("Flow test passed!")
-        test_engine_normal_mode()
-        print("Normal mode test passed!")
-        test_engine_retry_flow()
-        print("Retry test passed!")
-        test_engine_link_tracking()
-        print("Link tracking test passed!")
-    except Exception as e:
-        print(f"Engine test failed: {e}")
-        import traceback
-        traceback.print_exc()
+
+class TestEngineKBMode:
+    """Knowledge Base mode should delegate to the LangGraph compiled graph."""
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_kb_mode_invokes_graph(self, MockLLM, MockGraph):
+        mock_graph = MockGraph.return_value
+        mock_graph.invoke.return_value = {
+            "final_answer": "The project is on track based on DOC-1."
+        }
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        answer = engine.answer_query("What is the status of Project X?")
+
+        assert "on track" in answer
+        mock_graph.invoke.assert_called_once()
+
+        # Verify initial state structure
+        call_args = mock_graph.invoke.call_args[0][0]
+        assert call_args["query"] == "What is the status of Project X?"
+        assert call_args["mode"] == "knowledge_base"
+        assert call_args["iteration"] == 0
+        assert call_args["context"] == []
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_kb_mode_passes_history(self, MockLLM, MockGraph):
+        mock_graph = MockGraph.return_value
+        mock_graph.invoke.return_value = {"final_answer": "Follow-up answer"}
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        history = [
+            {"role": "user", "content": "What is Project X?"},
+            {"role": "assistant", "content": "Project X is..."},
+        ]
+
+        answer = engine.answer_query("Tell me more", history=history)
+
+        call_args = mock_graph.invoke.call_args[0][0]
+        assert call_args["messages"] == history
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_kb_mode_empty_answer_fallback(self, MockLLM, MockGraph):
+        mock_graph = MockGraph.return_value
+        mock_graph.invoke.return_value = {"final_answer": ""}
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        answer = engine.answer_query("Unknown topic")
+
+        assert "couldn't find" in answer.lower()
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_kb_mode_graph_error_handled(self, MockLLM, MockGraph):
+        mock_graph = MockGraph.return_value
+        mock_graph.invoke.side_effect = RuntimeError("LLM connection failed")
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        answer = engine.answer_query("test query")
+
+        assert "error" in answer.lower()
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.LLMClient")
+    def test_kb_mode_status_callback_passed(self, MockLLM, MockGraph):
+        mock_graph = MockGraph.return_value
+        mock_graph.invoke.return_value = {"final_answer": "test"}
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        status_calls = []
+        answer = engine.answer_query(
+            "test",
+            on_status=lambda e, m: status_calls.append((e, m)),
+        )
+
+        # At minimum, the engine emits "Starting agentic RAG workflow..."
+        assert len(status_calls) >= 1
+        assert any("🚀" in e for e, m in status_calls)
+
+        # The callback is also passed into the graph state
+        call_args = mock_graph.invoke.call_args[0][0]
+        assert call_args["status_callback"] is not None
+
+
+class TestEngineURLMode:
+    """URL handling should still work unchanged."""
+
+    @patch("kb_agent.engine.compile_graph")
+    @patch("kb_agent.engine.WebConnector")
+    @patch("kb_agent.engine.LLMClient")
+    def test_url_detection(self, MockLLM, MockWeb, MockGraph):
+        mock_llm = MockLLM.return_value
+        mock_web = MockWeb.return_value
+        
+        mock_web.fetch_data.return_value = [{
+            "id": "web_test",
+            "title": "Test Page",
+            "content": "Page content here",
+            "metadata": {"source": "web", "url": "https://example.com"},
+        }]
+        mock_llm.chat_completion.return_value = "Summary of the page"
+
+        from kb_agent.engine import Engine
+        engine = Engine()
+
+        answer = engine.answer_query("https://example.com what is this?")
+
+        assert "Summary" in answer
+        mock_web.fetch_data.assert_called_once()
+        # Graph should NOT be invoked for URL queries
+        MockGraph.return_value.invoke.assert_not_called()
