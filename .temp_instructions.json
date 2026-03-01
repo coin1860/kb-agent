@@ -1,0 +1,70 @@
+{
+  "changeName": "track-llm-stats",
+  "changeDir": "/Users/shaneshou/Dev/kb-agent/openspec/changes/track-llm-stats",
+  "schemaName": "spec-driven",
+  "contextFiles": {
+    "proposal": "/Users/shaneshou/Dev/kb-agent/openspec/changes/track-llm-stats/proposal.md",
+    "specs": "/Users/shaneshou/Dev/kb-agent/openspec/changes/track-llm-stats/specs/**/*.md",
+    "design": "/Users/shaneshou/Dev/kb-agent/openspec/changes/track-llm-stats/design.md",
+    "tasks": "/Users/shaneshou/Dev/kb-agent/openspec/changes/track-llm-stats/tasks.md"
+  },
+  "progress": {
+    "total": 10,
+    "complete": 0,
+    "remaining": 10
+  },
+  "tasks": [
+    {
+      "id": "1",
+      "description": "1.1 Add tracking fields (`llm_call_count`, `llm_prompt_tokens`, `llm_completion_tokens`, `llm_total_tokens`) to `AgentState` schema in `kb_agent/agent/state.py`.",
+      "done": false
+    },
+    {
+      "id": "2",
+      "description": "2.1 Implement `_invoke_and_track(llm: ChatOpenAI, messages: list, state: AgentState) -> AIMessage` helper function in `kb_agent/agent/nodes.py`.",
+      "done": false
+    },
+    {
+      "id": "3",
+      "description": "2.2 In `_invoke_and_track`, safely query `response.usage_metadata` or `response.response_metadata` for tokens, and accumulate them into the tracking fields in `AgentState`.",
+      "done": false
+    },
+    {
+      "id": "4",
+      "description": "2.3 Increment the `llm_call_count` by 1 within `_invoke_and_track` upon a successful LLM call.",
+      "done": false
+    },
+    {
+      "id": "5",
+      "description": "3.1 Replace direct `llm.invoke` calls with `_invoke_and_track(llm, messages, state)` inside `analyze_and_route_node`.",
+      "done": false
+    },
+    {
+      "id": "6",
+      "description": "3.2 Replace direct `llm.invoke` calls with `_invoke_and_track(llm, messages, state)` inside `plan_node`.",
+      "done": false
+    },
+    {
+      "id": "7",
+      "description": "3.3 Replace direct `llm.invoke` calls with `_invoke_and_track(llm, messages, state)` inside `grade_evidence_node`.",
+      "done": false
+    },
+    {
+      "id": "8",
+      "description": "3.4 Replace direct `llm.invoke` calls with `_invoke_and_track(llm, messages, state)` inside `synthesize_node` (for both normal flow and the chitchat fallback flow).",
+      "done": false
+    },
+    {
+      "id": "9",
+      "description": "4.1 Update `synthesize_node` to append the LLM Usage Stats block (`📊 **LLM Usage Stats:**`...) to the returned `final_answer`.",
+      "done": false
+    },
+    {
+      "id": "10",
+      "description": "4.2 Validate the rendering triggers correctly even when context items are filtered/missing.",
+      "done": false
+    }
+  ],
+  "state": "ready",
+  "instruction": "Read context files, work through pending tasks, mark complete as you go.\nPause if you hit blockers or need clarification."
+}

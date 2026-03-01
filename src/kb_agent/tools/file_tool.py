@@ -14,9 +14,9 @@ class FileTool:
             if settings.index_path:
                 self.allowed_paths.append(settings.index_path.resolve())
 
-    def read_file(self, file_path: str) -> Optional[str]:
+    def read_file(self, file_path: str) -> str:
         """
-        Reads a file from the allowed directories.
+        Reads a file from the allowed directories. Returns content or a descriptive error string.
         """
         try:
             path = Path(file_path).resolve()
@@ -29,13 +29,15 @@ class FileTool:
                     break
 
             if not is_allowed:
-                print(f"Access denied: {path} is outside allowed directories.")
-                return None
+                allowed_str = ", ".join([str(p) for p in self.allowed_paths])
+                return f"[ERROR: ACCESS_DENIED] Path '{file_path}' is outside allowed directories. Allowed directories are: [{allowed_str}]"
 
             if not path.exists():
-                return None
+                return f"[ERROR: NOT_FOUND] File '{file_path}' does not exist."
+
+            if not path.is_file():
+                return f"[ERROR: NOT_A_FILE] Path '{file_path}' is a directory, not a file."
 
             return path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
-            print(f"Error reading file {file_path}: {e}")
-            return None
+            return f"[ERROR: READ_FAILED] Unexpected error reading {file_path}: {str(e)}"

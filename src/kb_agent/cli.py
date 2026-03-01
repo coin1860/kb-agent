@@ -2,6 +2,12 @@ import argparse
 import sys
 import os
 from pathlib import Path
+import warnings
+
+# Suppress annoying urllib3/chardet mismatch warnings from requests
+# This must be done without importing requests directly, so we use string matching
+warnings.filterwarnings("ignore", message=".*urllib3.*doesn't match a supported version.*")
+
 import kb_agent.config as config
 from kb_agent.config import load_settings
 

@@ -19,18 +19,15 @@ logger = logging.getLogger("kb_agent_audit")
 class JiraConnector(BaseConnector):
     """Fetches Jira issues using the Jira REST API v2."""
 
-    def __init__(self, base_url: str = None, email: str = None, token: str = None):
+    def __init__(self, base_url: str = None, token: str = None):
         settings = config.settings
 
         self.base_url = base_url
-        self.email = email
         self.token = token
 
         if settings:
             if not self.base_url and settings.jira_url:
                 self.base_url = str(settings.jira_url).rstrip("/")
-            if not self.email and settings.jira_email:
-                self.email = settings.jira_email
             if not self.token and settings.jira_token:
                 self.token = settings.jira_token.get_secret_value()
 
@@ -38,17 +35,11 @@ class JiraConnector(BaseConnector):
     def _is_configured(self) -> bool:
         return bool(self.base_url and self.token)
 
-    def _auth(self):
-        """Return requests auth tuple. Cloud uses (email, token); Server uses Bearer."""
-        if self.email:
-            return (self.email, self.token)
-        # Server/DC with PAT — use token as password with empty user
-        return ("", self.token)
-
     def _headers(self):
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
         }
 
     # ------------------------------------------------------------------
@@ -81,7 +72,7 @@ class JiraConnector(BaseConnector):
         params = {"expand": "renderedFields"}
 
         try:
-            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+            resp = requests.get(url, headers=self._headers(),
                                 params=params, timeout=15, verify=False)
             if resp.status_code == 404:
                 return [{"id": issue_key, "title": f"Issue {issue_key} not found",
@@ -111,7 +102,7 @@ class JiraConnector(BaseConnector):
         }
 
         try:
-            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+            resp = requests.get(url, headers=self._headers(),
                                 params=params, timeout=15, verify=False)
             resp.raise_for_status()
             data = resp.json()

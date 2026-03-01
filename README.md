@@ -9,12 +9,13 @@
 
 ## 📖 Introduction
 
-   **Jules KB Agent** is an advanced, local-first knowledge retrieval system designed to bridge the gap between unstructured documentation (Markdown, Word, Excel) and structured architectural knowledge. Unlike traditional RAG systems that rely solely on vector similarity, this system employs an **Agentic RAG Workflow** powered by **LangGraph** that autonomously:
+   **Jules KB Agent** is an advanced, local-first knowledge retrieval system designed to bridge the gap between unstructured documentation (Markdown, Word, Excel) and structured architectural knowledge. Unlike traditional RAG systems that rely solely on vector similarity, this system employs a **6-node Adaptive CRAG (Corrective RAG) Workflow** powered by **LangGraph** that autonomously:
 
-    1. **Plans** which tools to call based on the user's query and gathered evidence.
-    2. **Executes** tools: keyword search (ripgrep), semantic search (ChromaDB), knowledge graph traversal (NetworkX), Jira & Confluence connectors.
-    3. **Evaluates** whether the retrieved evidence is sufficient to answer the question.
-    4. **Synthesizes** a grounded answer from the evidence — never from the LLM's own knowledge.
+    1. **Analyzes** query intent and classifies it (exact / conceptual / relational / file_discovery).
+    2. **Plans** which tools to call based on the routing plan and gathered evidence.
+    3. **Executes** tools: hybrid search (BM25 + Vector + RRF), knowledge graph traversal, Jira & Confluence connectors.
+    4. **Grades** evidence quality with CRAG scoring (0.0-1.0) and adaptively re-retrieves if needed.
+    5. **Synthesizes** a grounded answer with **source citations** — never from the LLM's own knowledge.
 
    Designed for **high-security banking environments**, it provides traceability, audit logging, and data masking (PII/PCI) in a strictly local execution model.
 
@@ -22,23 +23,31 @@
 
 ## 🌟 Key Features
 
-### 🧠 Agentic RAG with LangGraph
+### 🧠 Adaptive CRAG with LangGraph
 
-*   **Autonomous Planning**: The LLM decides which tools to invoke — no hard-coded if-else branches.
-*   **Recursive Reasoning Loop**: `Plan → Execute → Evaluate → (loop or answer)` with a 3-iteration safety cap.
-*   **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history. If nothing is found, the agent honestly says "I couldn't find relevant information."
+*   **Query Intent Analysis**: Incoming queries are classified into 4 intent types (`exact`, `conceptual`, `relational`, `file_discovery`) with automatic sub-question decomposition.
+*   **Hybrid Retrieval**: BM25-scored ripgrep + ChromaDB vector search fused via Reciprocal Rank Fusion (RRF, k=60).
+*   **CRAG Evidence Grading**: Each evidence item is scored 0.0–1.0. Low-scored items (< 0.3) are filtered. The system routes to GENERATE (avg ≥ 0.7), REFINE (0.3–0.7), or RE-RETRIEVE (< 0.3).
+*   **Source Citations**: Answers include inline `[N]` references and a citation footer with file paths and line numbers.
+*   **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history.
 *   **Multi-Turn Conversation**: Full conversation history is passed through the agent state, enabling natural follow-up questions grounded in prior context.
+*   **Recursive Reasoning Loop**: `Analyze → Plan → Execute → Grade → (loop or answer)` with a 3-iteration safety cap.
 
-### 🔧 Six Agent Tools
+> 📖 **[Architecture Deep-Dive →](docs/agentic-rag-architecture.md)** — Mermaid diagrams, LLM call analysis, and enhancement roadmap.
+
+### 🔧 Nine Agent Tools
 
 | Tool | Backend | Purpose |
 |---|---|---|
-| `grep_search` | Ripgrep | Exact keyword matching on indexed .md files |
+| `grep_search` | Ripgrep + BM25 | Keyword search with ±10 line context windows |
 | `vector_search` | ChromaDB | Semantic similarity search |
+| `hybrid_search` | Grep + Vector + RRF | Combined keyword and semantic fusion |
 | `read_file` | FileTool | Read full document content by path |
 | `graph_related` | NetworkX | Traverse Knowledge Graph relationships |
+| `local_file_qa` | Vector + Filename | File discovery and listing |
 | `jira_fetch` | Jira REST API | Fetch Jira issue details by key |
 | `confluence_fetch` | Confluence REST API | Fetch Confluence page by ID/title |
+| `web_fetch` | HTTP + HTML→MD | Fetch and convert web pages |
 
 ### 🕸️ Knowledge Graph Power
 
@@ -63,30 +72,42 @@
 
 ## 🏗️ Architecture
 
-### Agentic RAG Graph (LangGraph)
+### Agentic RAG Graph (LangGraph) — 6-Node CRAG Topology
 
 ```mermaid
 graph TD
-    Start([User Query]) --> Plan
+    Start(["🎯 User Query"]) --> Analyze
 
     subgraph "LangGraph StateGraph (max 3 iterations)"
-        Plan["🧠 Plan Node<br/>LLM picks tools"] --> ToolExec["🔍 Tool Node<br/>Execute tool calls"]
-        ToolExec --> Evaluate["🤔 Evaluate Node<br/>Is evidence sufficient?"]
-        Evaluate -->|"✅ Sufficient"| Synthesize["✨ Synthesize Node<br/>Generate grounded answer"]
-        Evaluate -->|"❌ Not sufficient<br/>& iteration < 3"| Plan
-        Evaluate -->|"❌ Not sufficient<br/>& iteration ≥ 3"| Synthesize
+        Analyze["🧭 analyze_and_route<br/>Intent Classification + Query Decomposition<br/><i>LLM Call #1</i>"]
+        Plan["🧠 plan<br/>Tool Selection & Parameter Planning<br/><i>LLM Call #2</i>"]
+        ToolExec["🔍 tool_exec<br/>Execute Tool Calls<br/><i>No LLM Call</i>"]
+        Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #3</i>"]
+        Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #4</i>"]
+
+        Analyze --> Plan
+        Plan --> ToolExec
+        ToolExec --> Grade
+        Grade -->|"✅ GENERATE<br/>avg ≥ 0.7"| Synth
+        Grade -->|"🔄 REFINE<br/>0.3 ≤ avg < 0.7<br/>& iter < 3"| Plan
+        Grade -->|"🗑️ RE_RETRIEVE<br/>avg < 0.3<br/>& iter < 3"| Analyze
+        Grade -->|"⏱️ iter ≥ 3"| Synth
     end
 
-    Synthesize --> Masking[Security Masking]
-    Masking --> End([Final Response])
+    Synth --> Mask["🛡️ Security Masking"]
+    Mask --> End(["📝 Final Answer (with citations)"])
 
-    style Start fill:#f9f,stroke:#333,stroke-width:2px
-    style End fill:#f9f,stroke:#333,stroke-width:2px
-    style Plan fill:#e3f2fd,stroke:#1565c0
-    style ToolExec fill:#e8f5e9,stroke:#2e7d32
-    style Evaluate fill:#fff3e0,stroke:#ef6c00
-    style Synthesize fill:#fce4ec,stroke:#c62828
+    style Start fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style End fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style Analyze fill:#e3f2fd,stroke:#1565c0,color:#000
+    style Plan fill:#e3f2fd,stroke:#1565c0,color:#000
+    style ToolExec fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style Grade fill:#fff3e0,stroke:#ef6c00,color:#000
+    style Synth fill:#fce4ec,stroke:#c62828,color:#000
+    style Mask fill:#f3e5f5,stroke:#6a1b9a,color:#000
 ```
+
+> 📖 See [docs/agentic-rag-architecture.md](docs/agentic-rag-architecture.md) for full Mermaid diagrams, LLM call sequence analysis, and enhancement roadmap.
 
 ### AgentState Schema
 
@@ -96,11 +117,15 @@ All nodes read from and write to a shared `AgentState`:
 |---|---|---|
 | `query` | `str` | Current user question |
 | `messages` | `list[dict]` | Full conversation history (multi-turn) |
-| `context` | `list[str]` | Accumulated evidence from tools |
+| `query_type` | `str` | Intent classification (`exact`/`conceptual`/`relational`/`file_discovery`) |
+| `routing_plan` | `dict` | Structured routing plan with suggested tools and keywords |
+| `sub_questions` | `list[str]` | Decomposed sub-questions for complex queries |
+| `context` | `list[str]` | Accumulated evidence from tools (with `[SOURCE:]` tags) |
 | `tool_history` | `list[dict]` | Log of tool invocations |
-| `iteration` | `int` | Loop counter (capped at 3) |
-| `is_sufficient` | `bool` | Evaluator verdict |
-| `final_answer` | `str` | Synthesised answer |
+| `evidence_scores` | `list[float]` | Relevance scores (0.0-1.0) from CRAG grader |
+| `grader_action` | `str` | CRAG decision: `GENERATE` / `REFINE` / `RE_RETRIEVE` |
+| `iteration` | `int` | Loop counter (capped at `KB_AGENT_MAX_ITERATIONS`, default 3) |
+| `final_answer` | `str` | Synthesised answer with citation footer |
 | `status_callback` | `callable` | TUI progress callback |
 
 ### Anti-Hallucination Design
@@ -208,11 +233,11 @@ src/kb_agent/
 ├── audit.py            # Audit Logging
 ├── security.py         # PII Masking
 ├── llm.py              # OpenAI-compatible LLM client
-├── agent/              # ⭐ Agentic RAG (LangGraph)
-│   ├── state.py        # AgentState TypedDict
-│   ├── tools.py        # 6 LangChain @tool wrappers
-│   ├── nodes.py        # Graph node functions (plan, tool, evaluate, synthesize)
-│   └── graph.py        # StateGraph definition & compilation
+├── agent/              # ⭐ Adaptive CRAG (LangGraph)
+│   ├── state.py        # AgentState TypedDict (17 fields)
+│   ├── tools.py        # 9 LangChain @tool wrappers (incl. hybrid_search)
+│   ├── nodes.py        # 5 graph nodes (analyze, plan, tool, grade, synthesize)
+│   └── graph.py        # 6-node StateGraph topology & CRAG routing
 ├── graph/
 │   └── graph_builder.py # NetworkX Knowledge Graph construction
 ├── tools/
@@ -230,13 +255,15 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-**Test coverage:**
-*   `test_agent_graph.py` — Agent nodes, routing, multi-turn, anti-hallucination (17 tests)
+**Test coverage (105 tests):**
+*   `test_agent_graph.py` — Agent nodes, CRAG routing, multi-turn, anti-hallucination (20 tests)
+*   `test_analyze_and_route.py` — Query intent classification (5 tests)
+*   `test_grade_evidence.py` — CRAG evidence grading (5 tests)
+*   `test_hybrid_search.py` — BM25 + Vector RRF fusion (4 tests)
 *   `test_engine_mock.py` — Engine public API: KB mode, normal mode, URL mode (8 tests)
 *   `test_security.py` — PII data masking
-*   `test_processor_mock.py` — Document processing pipeline
 *   `test_web_connector.py` — Web scraping connector
-*   `test_tui.py` — Terminal UI components
+*   `test_tui.py` — Terminal UI components (27 tests)
 
 ---
 

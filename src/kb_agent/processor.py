@@ -15,6 +15,9 @@ class Processor:
         # Dependencies
         self.llm = LLMClient()
         self.vector_tool = VectorTool()
+        
+        from kb_agent.chunking import MarkdownAwareChunker
+        self.chunker = MarkdownAwareChunker()
 
     def process(self, data: Dict[str, Any]):
         """
@@ -66,18 +69,30 @@ class Processor:
             ids=[f"{doc_id}-summary"]
         )
 
-        # Index Full Content (truncated)
-        truncated_content = full_content[:2000]
-
-        full_meta = metadata.copy()
-        full_meta.update({
-            "type": "full",
+        # Index Chunks instead of truncated full content
+        base_meta = metadata.copy()
+        base_meta.update({
+            "type": "chunk",
             "file_path": str(full_path),
-            "related_file": str(full_path) # Self-reference or same as above
+            "doc_id": doc_id,
+            "related_file": str(full_path)
         })
-
-        self.vector_tool.add_documents(
-            documents=[truncated_content],
-            metadatas=[full_meta],
-            ids=[f"{doc_id}-full"]
-        )
+        
+        chunks = self.chunker.chunk(full_content, base_meta)
+        
+        chunk_docs = []
+        chunk_metas = []
+        chunk_ids = []
+        
+        for c in chunks:
+            chunk_docs.append(c.text)
+            chunk_metas.append(c.metadata)
+            idx = c.metadata.get("chunk_index", 0)
+            chunk_ids.append(f"{doc_id}-chunk-{idx}")
+            
+        if chunk_docs:
+            self.vector_tool.add_documents(
+                documents=chunk_docs,
+                metadatas=chunk_metas,
+                ids=chunk_ids
+            )

@@ -28,7 +28,14 @@ class VectorTool:
             )
 
         if ef:
-            self.collection = self.client.get_or_create_collection(name=collection_name, embedding_function=ef)
+            try:
+                self.collection = self.client.get_collection(name=collection_name, embedding_function=ef)
+            except Exception:
+                try:
+                    self.collection = self.client.create_collection(name=collection_name, embedding_function=ef)
+                except Exception:
+                    # Fallback if there's a race condition or mismatch
+                    self.collection = self.client.get_or_create_collection(name=collection_name)
         else:
             self.collection = self.client.get_or_create_collection(name=collection_name)
 
@@ -63,11 +70,17 @@ class VectorTool:
             print(f"Error querying ChromaDB: {e}")
             return None
 
-    def search(self, query_text: str, n_results: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query_text: str, n_results: int = 5, threshold: Optional[float] = None) -> List[Dict[str, Any]]:
         """
         Convenience wrapper around query.
         Returns a list of dicts with 'id', 'content', 'metadata', 'score'.
+        Filters out results where distance >= threshold (if threshold is provided).
         """
+        # Fallback to configured default if not provided
+        if threshold is None:
+            settings = config.settings
+            threshold = settings.vector_score_threshold if settings and settings.vector_score_threshold is not None else 0.5
+            
         raw_results = self.query(query_text, n_results=n_results)
         if not raw_results or not raw_results['ids']:
             return []
@@ -79,11 +92,18 @@ class VectorTool:
         documents = raw_results['documents'][0] if raw_results.get('documents') else []
 
         for i, doc_id in enumerate(ids):
+            distance = distances[i] if i < len(distances) else 0.0
+            
+            # Filter by threshold (L2 distance: shorter is better, so discard if distance >= threshold)
+            # Default ChromaDB embedding space metric is l2
+            if threshold is not None and distance >= threshold:
+                continue
+                
             processed_results.append({
                 "id": doc_id,
                 "content": documents[i] if i < len(documents) else "",
                 "metadata": metadatas[i] if i < len(metadatas) else {},
-                "score": distances[i] if i < len(distances) else 0.0
+                "score": distance
             })
 
         return processed_results

@@ -91,6 +91,7 @@ class WebConnector(BaseConnector):
             browser_config = BrowserConfig(
                 headless=True,
                 verbose=False,
+                ignore_https_errors=True,
             )
 
             md_generator = DefaultMarkdownGenerator(
@@ -171,11 +172,15 @@ class WebConnector(BaseConnector):
     def _fetch_with_requests(self, url: str) -> List[Dict[str, Any]]:
         """Fallback: use requests + beautifulsoup + markdownify."""
         import requests
+        import urllib3
         from bs4 import BeautifulSoup
         from markdownify import markdownify as md
+        
+        # Disable SSL warnings
+        # urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         try:
-            resp = requests.get(url, headers=self.HEADERS, timeout=15, allow_redirects=True)
+            resp = requests.get(url, headers=self.HEADERS, timeout=15, allow_redirects=True, verify=False)
             resp.raise_for_status()
             resp.encoding = resp.apparent_encoding or "utf-8"
         except requests.RequestException as e:
@@ -193,18 +198,14 @@ class WebConnector(BaseConnector):
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
 
-        # Remove non-content elements
+        # Remove non-content elements (safe to do globally)
         for tag_name in ["script", "style", "nav", "footer", "header", "aside",
                          "form", "button", "iframe", "noscript", "svg"]:
             for tag in soup.find_all(tag_name):
                 tag.decompose()
 
-        for selector in ["[class*='cookie']", "[class*='banner']", "[class*='popup']",
-                         "[class*='modal']", "[class*='sidebar']", "[class*='advertisement']",
-                         "[class*='social']", "[id*='cookie']", "[id*='banner']"]:
-            for el in soup.select(selector):
-                el.decompose()
-
+        # Extract main content BEFORE destructive class-based filtering
+        # to prevent deleting the whole page if a wrapper happens to contain 'sidebar'
         main_content = (
             soup.find("article")
             or soup.find("main")
@@ -214,6 +215,16 @@ class WebConnector(BaseConnector):
         )
         if main_content is None:
             main_content = soup
+            
+        # Now apply the aggressive filters ONLY inside the main content (and don't delete main_content itself)
+        selectors = ["[class*='cookie']", "[class*='banner']", "[class*='popup']",
+                     "[class*='modal']", "[class*='sidebar']", "[class*='advertisement']",
+                     "[class*='social']", "[id*='cookie']", "[id*='banner']"]
+        for selector in selectors:
+            for el in main_content.select(selector):
+                # Never decompose the main_content root node itself
+                if el != main_content:
+                    el.decompose()
 
         markdown = md(str(main_content), heading_style="ATX", bullets="-", strip=["img"])
         markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()

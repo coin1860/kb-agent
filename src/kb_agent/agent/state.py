@@ -22,6 +22,14 @@ class AgentState(TypedDict, total=False):
     mode: str
     """Chat mode: 'knowledge_base' or 'normal'."""
 
+    # ── Routing & Analysis ────────────────────────────────────────────────
+
+    evidence_scores: list[float]
+    """Relevance scores (0.0-1.0) for each context item from the grader."""
+
+    grader_action: str
+    """Action chosen by the grader: 'GENERATE', 'REFINE', or 'RE_RETRIEVE'."""
+
     # ── Search / retrieval ────────────────────────────────────────────────
     search_queries: list[str]
     """LLM-generated keyword queries for retrieval tools."""
@@ -53,3 +61,16 @@ class AgentState(TypedDict, total=False):
     # ── TUI integration ───────────────────────────────────────────────────
     status_callback: Any
     """Optional callback ``(emoji: str, msg: str) -> None`` for TUI progress."""
+
+    # ── Tracking & Stats ──────────────────────────────────────────────────
+    llm_call_count: int
+    """Number of LLM API calls made during this run."""
+    
+    llm_prompt_tokens: int
+    """Total prompt tokens consumed during this run."""
+    
+    llm_completion_tokens: int
+    """Total completion tokens consumed during this run."""
+    
+    llm_total_tokens: int
+    """Total tokens consumed during this run."""

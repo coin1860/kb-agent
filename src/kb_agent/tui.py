@@ -19,69 +19,6 @@ from kb_agent.engine import Engine
 import kb_agent.config as config
 from kb_agent.config import load_settings
 
-# ─── Persistent Config ────────────────────────────────────────────────────────
-
-ENV_FILE = Path.home() / ".kb_agent" / ".env"
-
-
-def _save_env_file(api_key: str, base_url: str, model: str, data_folder: str = "", embedding_url: str = "", embedding_model: str = ""):
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        f'KB_AGENT_LLM_API_KEY="{api_key}"',
-        f'KB_AGENT_LLM_BASE_URL="{base_url}"',
-        f'KB_AGENT_LLM_MODEL="{model}"',
-    ]
-    if data_folder:
-        lines.append(f'KB_AGENT_DATA_FOLDER="{data_folder}"')
-    if embedding_url:
-        lines.append(f'KB_AGENT_EMBEDDING_URL="{embedding_url}"')
-    if embedding_model:
-        lines.append(f'KB_AGENT_EMBEDDING_MODEL="{embedding_model}"')
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped:
-                env_key, _, _ = stripped.partition("=")
-                env_key = env_key.strip()
-                if env_key not in ("KB_AGENT_LLM_API_KEY", "KB_AGENT_LLM_BASE_URL", "KB_AGENT_LLM_MODEL", "KB_AGENT_DATA_FOLDER", "KB_AGENT_EMBEDDING_URL", "KB_AGENT_EMBEDDING_MODEL"):
-                    lines.append(stripped)
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _save_env_var(key: str, value: str):
-    """Save or update a single env var in the .env file."""
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    found = False
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped:
-                env_key, _, _ = stripped.partition("=")
-                if env_key.strip() == key:
-                    lines.append(f'{key}="{value}"')
-                    found = True
-                    continue
-            lines.append(line)
-    if not found:
-        lines.append(f'{key}="{value}"')
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _load_env_file():
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped:
-                key, _, value = stripped.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
-
-
-_load_env_file()
-
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 
 SLASH_COMMANDS = [
@@ -101,11 +38,12 @@ class SettingsScreen(ModalScreen[bool]):
     #settings-dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: auto auto auto auto auto auto auto auto auto;
+        grid-rows: auto auto auto auto auto auto auto auto auto auto auto auto auto;
         padding: 1 2;
         width: 70;
         height: auto;
-        max-height: 40;
+        max-height: 80vh;
+        overflow-y: auto;
         border: thick $primary 60%;
         background: $surface;
     }
@@ -133,12 +71,17 @@ class SettingsScreen(ModalScreen[bool]):
     """
 
     def compose(self) -> ComposeResult:
-        current_url = str(config.settings.llm_base_url) if config.settings else ""
-        current_model = config.settings.llm_model if config.settings else "gpt-4"
+        current_url = str(config.settings.llm_base_url) if config.settings and config.settings.llm_base_url else ""
+        current_model = config.settings.llm_model if config.settings and config.settings.llm_model else "gpt-4"
         current_data_folder = str(config.settings.data_folder) if config.settings and config.settings.data_folder else ""
-        current_api_key = config.settings.llm_api_key.get_secret_value() if config.settings else ""
-        current_embedding_url = config.settings.embedding_url if config.settings else ""
-        current_embedding_model = config.settings.embedding_model if config.settings else ""
+        current_api_key = config.settings.llm_api_key.get_secret_value() if config.settings and config.settings.llm_api_key else ""
+        current_embedding_url = config.settings.embedding_url if config.settings and config.settings.embedding_url else ""
+        current_embedding_model = config.settings.embedding_model if config.settings and config.settings.embedding_model else ""
+        current_max_iter = str(config.settings.max_iterations) if config.settings and config.settings.max_iterations is not None else "1"
+        current_threshold = str(config.settings.vector_score_threshold) if config.settings and config.settings.vector_score_threshold is not None else "0.5"
+        current_chunk_max = str(config.settings.chunk_max_chars) if config.settings and config.settings.chunk_max_chars is not None else "800"
+        current_chunk_overlap = str(config.settings.chunk_overlap_chars) if config.settings and config.settings.chunk_overlap_chars is not None else "200"
+        current_debug_mode = str(config.settings.debug_mode) if config.settings and config.settings.debug_mode is not None else "False"
 
         with Grid(id="settings-dialog"):
             yield Label("⚙  Settings", id="settings-title")
@@ -173,8 +116,32 @@ class SettingsScreen(ModalScreen[bool]):
             yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
             yield Input(
                 placeholder="1",
-                value=os.getenv("KB_AGENT_MAX_ITERATIONS", "1"),
+                value=current_max_iter,
                 id="max_iterations", classes="settings-input",
+            )
+            yield Label("Vector Score Threshold", classes="settings-label", id="lbl-vector-threshold")
+            yield Input(
+                placeholder="0.5",
+                value=current_threshold,
+                id="vector_score_threshold", classes="settings-input",
+            )
+            yield Label("Chunk Max Chars", classes="settings-label", id="lbl-chunk-max")
+            yield Input(
+                placeholder="800",
+                value=current_chunk_max,
+                id="chunk_max_chars", classes="settings-input",
+            )
+            yield Label("Chunk Overlap Chars", classes="settings-label", id="lbl-chunk-overlap")
+            yield Input(
+                placeholder="200",
+                value=current_chunk_overlap,
+                id="chunk_overlap_chars", classes="settings-input",
+            )
+            yield Label("Debug Mode", classes="settings-label", id="lbl-debug-mode")
+            yield Input(
+                placeholder="True / False",
+                value=current_debug_mode,
+                id="debug_mode", classes="settings-input",
             )
             with Horizontal(id="settings-buttons"):
                 yield Button("Save", id="save")
@@ -188,6 +155,10 @@ class SettingsScreen(ModalScreen[bool]):
             data_folder = self.query_one("#data_folder").value.strip()
             embedding_url = self.query_one("#embedding_url").value.strip()
             embedding_model = self.query_one("#embedding_model").value.strip()
+            threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.5"
+            chunk_max_raw = self.query_one("#chunk_max_chars").value.strip() or "800"
+            chunk_overlap_raw = self.query_one("#chunk_overlap_chars").value.strip() or "200"
+            debug_mode_raw = self.query_one("#debug_mode").value.strip().lower()
 
             if not api_key:
                 self.notify("API Key is required!", severity="error")
@@ -195,35 +166,59 @@ class SettingsScreen(ModalScreen[bool]):
             if not base_url:
                 self.notify("Base URL is required!", severity="error")
                 return
-            os.environ["KB_AGENT_LLM_API_KEY"] = api_key
-            os.environ["KB_AGENT_LLM_BASE_URL"] = base_url
-            os.environ["KB_AGENT_LLM_MODEL"] = model
-            if data_folder:
-                os.environ["KB_AGENT_DATA_FOLDER"] = data_folder
-            elif "KB_AGENT_DATA_FOLDER" in os.environ:
-                del os.environ["KB_AGENT_DATA_FOLDER"]
-
-            if embedding_url:
-                os.environ["KB_AGENT_EMBEDDING_URL"] = embedding_url
-            elif "KB_AGENT_EMBEDDING_URL" in os.environ:
-                del os.environ["KB_AGENT_EMBEDDING_URL"]
-
-            if embedding_model:
-                os.environ["KB_AGENT_EMBEDDING_MODEL"] = embedding_model
-            elif "KB_AGENT_EMBEDDING_MODEL" in os.environ:
-                del os.environ["KB_AGENT_EMBEDDING_MODEL"]
-
+            
+            # Save LLM settings via config module
+            from pydantic import SecretStr
+            
             # Max iterations (clamp 1-5)
             max_iter_raw = self.query_one("#max_iterations").value.strip() or "1"
             try:
                 max_iter = max(1, min(5, int(max_iter_raw)))
             except ValueError:
                 max_iter = 1
-            os.environ["KB_AGENT_MAX_ITERATIONS"] = str(max_iter)
-            _save_env_var("KB_AGENT_MAX_ITERATIONS", str(max_iter))
+                
+            try:
+                threshold = float(threshold_raw)
+            except ValueError:
+                threshold = 0.5
+                
+            try:
+                chunk_max = int(chunk_max_raw)
+            except ValueError:
+                chunk_max = 800
+                
+            try:
+                chunk_overlap = int(chunk_overlap_raw)
+            except ValueError:
+                chunk_overlap = 200
 
-            _save_env_file(api_key, base_url, model, data_folder, embedding_url, embedding_model)
-            if load_settings():
+            debug_mode = debug_mode_raw in ("true", "1", "yes", "t", "y")
+
+            # Maintain the current settings if possible, else create new ones
+            new_settings_data = {}
+            if config.settings:
+                new_settings_data = config.settings.model_dump(mode='json')
+            
+            new_settings_data.update({
+                "llm_api_key": api_key,
+                "llm_base_url": base_url,
+                "llm_model": model,
+                "data_folder": data_folder if data_folder else None,
+                "embedding_url": embedding_url if embedding_url else None,
+                "embedding_model": embedding_model if embedding_model else None,
+                "max_iterations": max_iter,
+                "vector_score_threshold": threshold,
+                "chunk_max_chars": chunk_max,
+                "chunk_overlap_chars": chunk_overlap,
+                "debug_mode": debug_mode
+            })
+            
+            os.environ["KB_AGENT_MAX_ITERATIONS"] = str(max_iter)
+            
+            new_settings = config.Settings(**new_settings_data)
+            config.save_settings(new_settings)
+
+            if config.load_settings():
                 self.dismiss(True)
             else:
                 self.notify("Invalid settings.", severity="error")
@@ -331,7 +326,7 @@ class WebEngineScreen(ModalScreen[str]):
     def _save_and_dismiss(self, engine: str):
         if engine in ("markdownify", "crawl4ai"):
             os.environ["KB_AGENT_WEB_ENGINE"] = engine
-            _save_env_var("KB_AGENT_WEB_ENGINE", engine)
+            config.update_setting("web_engine", engine)
             self.notify(f"Web engine set to: {engine}", severity="information")
             self.dismiss(engine)
         else:

@@ -24,7 +24,7 @@ class LLMClient:
 
         self.model = model_name
 
-    def chat_completion(self, messages: list, temperature: float = 0.0) -> str:
+    def chat_completion(self, messages: list, temperature: float = 0.2) -> str:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -38,8 +38,36 @@ class LLMClient:
             return "Error generating response."
 
     def generate_summary(self, content: str) -> str:
-        """Specific helper for generating summaries."""
-        prompt = f"Please provide a concise summary of the following document. Focus on key entities, decisions, and outcomes:\n\n{content[:4000]}" # Truncate for safety
+        """Specific helper for generating summaries, with Map-Reduce for large docs."""
+        if len(content) <= 4000:
+            return self._summarize_text(content)
+            
+        # Map Phase: chunk and summarize each
+        from kb_agent.chunking import MarkdownAwareChunker
+        chunker = MarkdownAwareChunker(max_chars=4000, overlap_chars=200)
+        chunks = chunker.chunk(content, {})
+        
+        sub_summaries = []
+        for i, c in enumerate(chunks):
+            sub_sum = self._summarize_text(c.text, context=f"Part {i+1} of {len(chunks)}")
+            sub_summaries.append(f"--- Part {i+1} Summary ---\n{sub_sum}")
+            
+        # Reduce Phase: combine sub summaries
+        combined = "\n\n".join(sub_summaries)
+        
+        reduce_prompt = f"The following are summaries of different parts of a large document. Please merge them into a single, cohesive, and comprehensive global summary. Focus on key entities, decisions, and overall outcomes:\n\n{combined[:30000]}" # Safety bound for huge files
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that synthesizes multiple document summaries into one cohesive global summary."},
+            {"role": "user", "content": reduce_prompt}
+        ]
+        return self.chat_completion(messages)
+
+    def _summarize_text(self, text: str, context: str = "") -> str:
+        prompt = f"Please provide a concise summary of the following document text. Focus on key entities, decisions, and outcomes:\n\n{text}"
+        if context:
+            prompt = f"Context: {context}\n\n{prompt}"
+            
         messages = [
             {"role": "system", "content": "You are a helpful assistant that summarizes technical documents."},
             {"role": "user", "content": prompt}

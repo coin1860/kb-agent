@@ -137,7 +137,8 @@ class TestToolNode:
 
         result = tool_node(state)
         assert len(result["context"]) == 1
-        assert "grep_search" in result["context"][0]
+        assert "login info" in result["context"][0]
+        assert "DOC-1.md" in result["context"][0]
         assert len(result["tool_history"]) == 1
 
     def test_tool_node_no_pending(self):
@@ -157,53 +158,58 @@ class TestToolNode:
 
 
 # ---------------------------------------------------------------------------
-# 3. Evaluate node — sufficient / not sufficient
+# 3. Grade Evidence node (CRAG)
 # ---------------------------------------------------------------------------
 
-class TestEvaluateNode:
+class TestGradeEvidenceNode:
     @patch("kb_agent.agent.nodes._build_llm")
-    def test_evaluate_sufficient(self, mock_build):
+    def test_grade_evidence_generate(self, mock_build):
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = _make_ai_message('{"sufficient": true}')
+        mock_llm.invoke.return_value = _make_ai_message('[1.0]')
         mock_build.return_value = mock_llm
 
-        from kb_agent.agent.nodes import evaluate_node
-
-        state = {
-            "query": "What is X?",
-            "messages": [],
-            "context": ["[grep_search] found X info"],
+        from kb_agent.config import settings
+        with patch.object(settings, "auto_approve_max_items", 0):
+            from kb_agent.agent.nodes import grade_evidence_node
+    
+            state = {
+                "query": "What is X?",
+                "messages": [],
+            "context": ["[SOURCE:test.md:L1] found X info"],
             "iteration": 0,
             "status_callback": _noop_status,
         }
 
-        result = evaluate_node(state)
-        assert result["is_sufficient"] is True
+        result = grade_evidence_node(state)
+        assert result["grader_action"] == "GENERATE"
         assert result["iteration"] == 1
 
     @patch("kb_agent.agent.nodes._build_llm")
-    def test_evaluate_not_sufficient(self, mock_build):
+    def test_grade_evidence_refine(self, mock_build):
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = _make_ai_message(
-            '{"sufficient": false, "reason": "missing details"}'
+            '[0.5]'
         )
         mock_build.return_value = mock_llm
 
-        from kb_agent.agent.nodes import evaluate_node
+        from kb_agent.config import settings
+        with patch.object(settings, "auto_approve_max_items", 0):
+            from kb_agent.agent.nodes import grade_evidence_node
+    
+            state = {
+                "query": "What is X?",
+                "messages": [],
+                "context": ["[SOURCE:test.md:L1] partial info"],
+                "iteration": 0,
+                "status_callback": _noop_status,
+            }
+        
+            result = grade_evidence_node(state)
+        assert result["grader_action"] == "REFINE"
+        assert len(result["context"]) == 1
 
-        state = {
-            "query": "What is X?",
-            "messages": [],
-            "context": ["[grep_search] partial info"],
-            "iteration": 0,
-            "status_callback": _noop_status,
-        }
-
-        result = evaluate_node(state)
-        assert result["is_sufficient"] is False
-
-    def test_evaluate_no_context(self):
-        from kb_agent.agent.nodes import evaluate_node
+    def test_grade_evidence_no_context(self):
+        from kb_agent.agent.nodes import grade_evidence_node
 
         state = {
             "query": "What is X?",
@@ -213,8 +219,8 @@ class TestEvaluateNode:
             "status_callback": _noop_status,
         }
 
-        result = evaluate_node(state)
-        assert result["is_sufficient"] is False
+        result = grade_evidence_node(state)
+        assert result["grader_action"] == "RE_RETRIEVE"
 
 
 # ---------------------------------------------------------------------------
@@ -267,24 +273,29 @@ class TestSynthesizeNode:
 
 class TestRouting:
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_sufficient(self):
-        from kb_agent.agent.graph import _route_after_evaluate
-        assert _route_after_evaluate({"is_sufficient": True, "iteration": 1}) == "synthesize"
+    def test_route_generate(self):
+        from kb_agent.agent.graph import _route_after_grade
+        assert _route_after_grade({"grader_action": "GENERATE", "iteration": 1}) == "synthesize"
 
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_not_sufficient_under_limit(self):
-        from kb_agent.agent.graph import _route_after_evaluate
-        assert _route_after_evaluate({"is_sufficient": False, "iteration": 1}) == "plan"
+    def test_route_refine_under_limit(self):
+        from kb_agent.agent.graph import _route_after_grade
+        assert _route_after_grade({"grader_action": "REFINE", "iteration": 1}) == "plan"
+        
+    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
+    def test_route_reretrieve_under_limit(self):
+        from kb_agent.agent.graph import _route_after_grade
+        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 1}) == "analyze_and_route"
 
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
     def test_route_max_iterations(self):
-        from kb_agent.agent.graph import _route_after_evaluate
-        assert _route_after_evaluate({"is_sufficient": False, "iteration": 3}) == "synthesize"
+        from kb_agent.agent.graph import _route_after_grade
+        assert _route_after_grade({"grader_action": "REFINE", "iteration": 3}) == "synthesize"
 
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
     def test_route_exactly_at_limit(self):
-        from kb_agent.agent.graph import _route_after_evaluate
-        assert _route_after_evaluate({"is_sufficient": False, "iteration": 4}) == "synthesize"
+        from kb_agent.agent.graph import _route_after_grade
+        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 4}) == "synthesize"
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +325,12 @@ class TestStatusCallback:
         assert any("🧠" in e for e, m in status_calls)
 
     @patch("kb_agent.agent.nodes._build_llm")
-    def test_evaluate_emits_status(self, mock_build):
+    def test_grade_emits_status(self, mock_build):
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = _make_ai_message('{"sufficient": true}')
+        mock_llm.invoke.return_value = _make_ai_message('[1.0]')
         mock_build.return_value = mock_llm
 
-        from kb_agent.agent.nodes import evaluate_node
+        from kb_agent.agent.nodes import grade_evidence_node
 
         status_calls = []
         state = {
@@ -330,9 +341,9 @@ class TestStatusCallback:
             "status_callback": lambda e, m: status_calls.append((e, m)),
         }
 
-        evaluate_node(state)
+        grade_evidence_node(state)
         assert len(status_calls) >= 1
-        assert any("🤔" in e for e, m in status_calls)
+        assert any("⚖️" in e or "✅" in e for e, m in status_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -413,4 +424,4 @@ class TestAntiHallucination:
         call_args = mock_llm.invoke.call_args[0][0]
         system_msg = call_args[0].content
         assert "ONLY" in system_msg
-        assert "Do NOT use your own knowledge" in system_msg
+        assert "The answer must come ONLY from the evidence — never from your own knowledge." in system_msg

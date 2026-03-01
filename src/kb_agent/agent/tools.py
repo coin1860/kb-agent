@@ -24,6 +24,7 @@ _graph: object | None = None
 _jira: object | None = None
 _confluence: object | None = None
 _web: object | None = None
+_local_qa: object | None = None
 
 
 def _get_grep():
@@ -81,11 +82,18 @@ def _get_web():
         _web = WebConnector()
     return _web
 
+def _get_local_qa():
+    global _local_qa
+    if _local_qa is None:
+        from kb_agent.tools.local_file_qa import LocalFileQATool
+        _local_qa = LocalFileQATool()
+    return _local_qa
+
 
 def reset_singletons():
     """Reset all lazy singletons — useful for tests."""
-    global _grep, _vector, _file, _graph, _jira, _confluence, _web
-    _grep = _vector = _file = _graph = _jira = _confluence = _web = None
+    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa
+    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +146,9 @@ def read_file(file_path: str) -> str:
         file_path: Path to the file to read (relative or absolute).
 
     Returns:
-        The file content as a string, or an error message.
+        The file content as a string, or a descriptive error message.
     """
     content = _get_file().read_file(file_path)
-    if content is None:
-        return f"File not found or access denied: {file_path}"
     if len(content) > 8000:
         return content[:8000] + "\n... (truncated)"
     return content
@@ -220,13 +226,31 @@ def web_fetch(url: str) -> str:
     return json.dumps(results, ensure_ascii=False)
 
 
+@tool
+def local_file_qa(query: str) -> str:
+    """Search for local files by filename and context keywords.
+    
+    Use this when the user explicitly asks to "Find files related to X" or
+    "Search for files" or when you need a numbered list of files to reference
+    in subsequent questions (e.g. "Summarize file 1").
+
+    Args:
+        query: The semantic keywords or filename to search for.
+
+    Returns:
+        A 1-indexed formatted string table of matching files.
+    """
+    return _get_local_qa().query(query)
+
+
 # Convenience list for graph construction
 ALL_TOOLS = [
-    grep_search,
+    # grep_search, # TEMPORARILY DISABLED
     vector_search,
     read_file,
     graph_related,
     jira_fetch,
     confluence_fetch,
     web_fetch,
+    local_file_qa
 ]

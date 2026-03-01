@@ -19,18 +19,15 @@ logger = logging.getLogger("kb_agent_audit")
 class ConfluenceConnector(BaseConnector):
     """Fetches Confluence pages using the Confluence REST API."""
 
-    def __init__(self, base_url: str = None, email: str = None, token: str = None):
+    def __init__(self, base_url: str = None, token: str = None):
         settings = config.settings
 
         self.base_url = base_url
-        self.email = email
         self.token = token
 
         if settings:
             if not self.base_url and settings.confluence_url:
                 self.base_url = str(settings.confluence_url).rstrip("/")
-            if not self.email and settings.confluence_email:
-                self.email = settings.confluence_email
             if not self.token and settings.confluence_token:
                 self.token = settings.confluence_token.get_secret_value()
 
@@ -38,16 +35,11 @@ class ConfluenceConnector(BaseConnector):
     def _is_configured(self) -> bool:
         return bool(self.base_url and self.token)
 
-    def _auth(self):
-        """Return requests auth tuple."""
-        if self.email:
-            return (self.email, self.token)
-        return ("", self.token)
-
     def _headers(self):
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
         }
 
     # ------------------------------------------------------------------
@@ -81,7 +73,7 @@ class ConfluenceConnector(BaseConnector):
         }
 
         try:
-            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+            resp = requests.get(url, headers=self._headers(),
                                 params=params, timeout=15, verify=False)
             if resp.status_code == 404:
                 return [{"id": page_id, "title": f"Page {page_id} not found",
@@ -108,7 +100,7 @@ class ConfluenceConnector(BaseConnector):
         }
 
         try:
-            resp = requests.get(url, auth=self._auth(), headers=self._headers(),
+            resp = requests.get(url, headers=self._headers(),
                                 params=params, timeout=15, verify=False)
             resp.raise_for_status()
             data = resp.json()
