@@ -16,4 +16,4 @@ lib/
 share/
 include/
 pyvenv.cfg
-docs/
+# docs/ removed to allow tracking
