@@ -18,7 +18,7 @@ graph TD
     subgraph "LangGraph StateGraph (max 3 iterations)"
         Analyze["🧭 analyze_and_route<br/>意图分类 + 查询分解<br/><i>LLM Call #1</i>"]
         Plan["🧠 plan<br/>工具选择与参数规划<br/><i>LLM Call #2</i>"]
-        ToolExec["🔍 tool_exec<br/>执行工具调用<br/><i>No LLM Call</i>"]
+        ToolExec["🔍 tool_exec<br/>Execute Supported Tools:<br/>- hybrid_search<br/>- vector_search<br/>- grep_search<br/>- local_file_qa<br/>- read_file<br/>- graph_related<br/>- jira_fetch<br/>- confluence_fetch<br/>- web_fetch<br/>- index_command<br/><i>No LLM Call</i>"]
         Grade["⚖️ grade_evidence<br/>CRAG 证据评分<br/><i>LLM Call #3</i>"]
         Synth["✨ synthesize<br/>带引用的答案生成<br/><i>LLM Call #4</i>"]
 
@@ -112,6 +112,7 @@ graph LR
     subgraph "File Operations"
         E["read_file"]
         F["local_file_qa"]
+        J["index_command"]
     end
     subgraph "External"
         G["jira_fetch"]
@@ -128,6 +129,7 @@ graph LR
     style G fill:#fff3e0,stroke:#ef6c00,color:#000
     style H fill:#fff3e0,stroke:#ef6c00,color:#000
     style I fill:#fff3e0,stroke:#ef6c00,color:#000
+    style J fill:#fce4ec,stroke:#c62828,color:#000
 ```
 
 ---
