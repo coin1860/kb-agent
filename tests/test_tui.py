@@ -30,7 +30,7 @@ from kb_agent.tui import (
     KBAgentApp, CommandPalette, StatusBar, ChatInput,
     SettingsScreen, SLASH_COMMANDS, LOGO, WELCOME, HELP_TEXT,
 )
-from textual.widgets import RichLog, Input, Header, TextArea, Button
+from textual.widgets import Input, Header, TextArea, Button, RichLog
 
 
 def make_app():

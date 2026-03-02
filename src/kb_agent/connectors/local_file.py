@@ -26,7 +26,7 @@ class LocalFileConnector(BaseConnector):
                     if not content.strip():
                         print(f"Warning: Extracted empty text from {file_path.name}")
                     results.append({
-                        "id": file_path.name,
+                        "id": file_path.stem,
                         "title": file_path.stem,
                         "content": content,
                         "metadata": {"source": "local_file", "path": str(file_path), "type": file_path.suffix}
@@ -44,7 +44,7 @@ class LocalFileConnector(BaseConnector):
                     if not content.strip():
                         print(f"Warning: Extracted empty text from {file_path.name}")
                     results.append({
-                        "id": file_path.name,
+                        "id": file_path.stem,
                         "title": file_path.stem,
                         "content": content,
                         "metadata": {"source": "local_file", "path": str(file_path), "type": file_path.suffix}

@@ -20,6 +20,7 @@ from kb_agent.processor import Processor
 
 # Agentic RAG (LangGraph)
 from kb_agent.agent.graph import compile_graph
+from kb_agent.agent.tools import reset_tools_cache
 
 # Regex to detect URLs, Jira tickets, and Confluence page IDs
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
@@ -34,6 +35,9 @@ class Engine:
         self.llm = LLMClient()
         self.web_connector = WebConnector()
         self._docs_path = Path("docs")
+
+        # Clear cached tool instances so they pick up new config
+        reset_tools_cache()
 
         # Compile the agentic RAG graph once
         self._graph = compile_graph()
@@ -55,7 +59,7 @@ class Engine:
         on_status=None,
         mode: str = "knowledge_base",
         history: List[Dict[str, str]] = None,
-    ) -> str:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """
         Main entry point for answering a user query.
 
@@ -64,6 +68,9 @@ class Engine:
             on_status: Optional callback ``(emoji, message)`` for TUI progress.
             mode: ``"knowledge_base"`` or ``"normal"``.
             history: Previous conversation messages ``[{role, content}, ...]``.
+            
+        Returns:
+            A tuple of (answer_text, sources_list) where each source is a dict.
         """
         def _status(emoji, msg):
             if on_status:
@@ -86,7 +93,7 @@ class Engine:
             messages.append({"role": "user", "content": user_query})
             raw_response = self.llm.chat_completion(messages)
             log_llm_response(user_query, raw_response)
-            return Security.mask_sensitive_data(raw_response)
+            return Security.mask_sensitive_data(raw_response), []
 
         # 2. Knowledge Base mode — agentic RAG via LangGraph
         return self._run_agentic_rag(user_query, _status, history)
@@ -100,7 +107,7 @@ class Engine:
         user_query: str,
         _status,
         history: List[Dict[str, str]],
-    ) -> str:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Invoke the LangGraph compiled workflow."""
         _status("🚀", "Starting agentic RAG workflow...")
 
@@ -121,15 +128,16 @@ class Engine:
         try:
             final_state = self._graph.invoke(initial_state)
             answer = final_state.get("final_answer", "")
+            sources = final_state.get("sources", [])
             if not answer:
                 answer = (
                     "I couldn't find relevant information in the knowledge base "
                     "to answer this question."
                 )
-            return answer
+            return answer, sources
         except Exception as e:
             logger.error(f"Agentic RAG failed: {e}")
-            return f"An error occurred while processing your query: {e}"
+            return f"An error occurred while processing your query: {e}", []
 
     # ------------------------------------------------------------------
     # URL handling (unchanged)
@@ -142,7 +150,7 @@ class Engine:
         _status,
         mode: str = "knowledge_base",
         history: List[Dict[str, str]] = None,
-    ) -> str:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Fetch URLs, convert to markdown, process, and answer."""
         history = history or []
         all_content = []
@@ -169,7 +177,7 @@ class Engine:
                 )
 
         if not all_content:
-            return "Failed to fetch any content from the provided URL(s)."
+            return "Failed to fetch any content from the provided URL(s).", []
 
         full_context = "\n\n---\n\n".join(all_content)
 
@@ -194,7 +202,7 @@ class Engine:
 
         raw_response = self.llm.chat_completion(messages)
         log_llm_response(user_prompt, raw_response)
-        return Security.mask_sensitive_data(raw_response)
+        return Security.mask_sensitive_data(raw_response), []
 
     def index_resource(self, url_or_id: str, on_status=None) -> str:
         """

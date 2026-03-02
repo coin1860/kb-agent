@@ -48,8 +48,7 @@ def test_grade_evidence_refine(mock_llm_response):
     result = grade_evidence_node(state)
     
     assert result["grader_action"] == "REFINE" # avg is 0.5
-    assert len(result["context"]) == 1 # 0.1 filtered out
-    assert result["context"][0] == "Step 1 is X"
+    assert len(result["context"]) == 2 # 0.1 kept
 
 def test_grade_evidence_re_retrieve(mock_llm_response):
     mock_llm_response('''[0.1, 0.2]''')
@@ -61,7 +60,7 @@ def test_grade_evidence_re_retrieve(mock_llm_response):
     result = grade_evidence_node(state)
     
     assert result["grader_action"] == "RE_RETRIEVE" # avg is 0.15
-    assert len(result["context"]) == 0 # both filtered out
+    assert len(result["context"]) == 2 # both kept
 
 def test_grade_evidence_parse_failure(mock_llm_response):
     mock_llm_response('''Sorry, I cannot help.''')

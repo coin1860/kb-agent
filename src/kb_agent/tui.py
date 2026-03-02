@@ -645,6 +645,32 @@ class KBAgentApp(App):
     #btn-copy.visible {
         display: block;
     }
+    #source-links-container {
+        height: auto;
+        min-height: 0;
+        max-height: 4;
+        padding: 0 2 1 2;
+        display: none;
+    }
+    #source-links-container.visible {
+        display: block;
+    }
+    .source-label {
+        height: 1;
+        padding: 0 1 0 0;
+    }
+    .source-link-btn {
+        margin-right: 1;
+        margin-bottom: 1;
+        height: 1;
+        border: none;
+        background: $panel;
+        min-width: 10;
+        padding: 0 1;
+    }
+    .source-link-btn:hover {
+        background: $primary;
+    }
     """
 
     engine = None
@@ -918,9 +944,18 @@ class KBAgentApp(App):
         self.call_from_thread(log.write, "")
 
         try:
-            response = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode, history=self.chat_history)
+            response_tuple = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode, history=self.chat_history)
             
-            # Update history
+            if isinstance(response_tuple, tuple) and len(response_tuple) == 2:
+                response, sources = response_tuple
+            else:
+                response = str(response_tuple)
+                sources = []
+            
+            # Save sources for the modal action links
+            self._current_sources = sources
+            
+            # Update history (strictly WITHOUT sources)
             self.chat_history.append({"role": "user", "content": query})
             self.chat_history.append({"role": "assistant", "content": response})
 
@@ -931,6 +966,24 @@ class KBAgentApp(App):
             )
             # Render the entire response as Markdown with indentation
             self.call_from_thread(log.write, Padding(Markdown(response), (0, 0, 0, 2)))
+            
+            # Write sources as static text to the RichLog
+            if sources:
+                self.call_from_thread(log.write, "  [bold italic]🔗 Sources:[/bold italic]")
+                for src in sources:
+                    path = src.get('path', 'Unknown')
+                    filename = path.split('/')[-1] if '/' in path else path
+                    line = src.get('line', '1')
+                    score = src.get('score')
+                    
+                    if score is not None:
+                        sim = max(1, min(99, int((1.0 - (score / 2.0)) * 100)))
+                        score_text = f" ({sim}%)"
+                    else:
+                        score_text = ""
+                        
+                    self.call_from_thread(log.write, f"    [dim]📄 {filename} (Line {line}){score_text}[/dim]")
+            
             
             # Set last response to enable Copy button
             self.last_response = response

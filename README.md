@@ -15,10 +15,10 @@
 
    **GTS KB Agent** is an advanced, local-first knowledge retrieval system designed to bridge the gap between unstructured documentation (Markdown, Word, Excel, PDF) and structured architectural knowledge. Unlike traditional RAG systems that rely solely on vector similarity, this system employs an **Adaptive CRAG Workflow** powered by **LangGraph** that autonomously:
 
-    1. **Analyzes** query intent and classifies it (exact / conceptual / relational / file_discovery).
-    2. **Plans** which tools to call based on the routing plan and gathered evidence.
-    3. **Executes** tools: hybrid search (BM25 + Vector + RRF), knowledge graph traversal, Jira & Confluence connectors.
-    4. **Grades** evidence quality with CRAG scoring (0.0-1.0) and adaptively re-retrieves if needed.
+    1. **Analyzes** query intent and classifies it, using LLM-based query decomposition for parallel searches.
+    2. **Plans** which tools to call based on the routing plan, discovered file/page clues, and gathered evidence.
+    3. **Executes** tools: hybrid search (BM25 + Vector + RRF), knowledge graph traversal, Jira & Confluence connectors. Deduplicates chunks on the fly.
+    4. **Grades** evidence quality with CRAG scoring (0.0-1.0) and adaptively re-retrieves if needed, tracking file paths for retry rounds.
     5. **Synthesizes** a grounded answer with **source citations** — never from the LLM's own knowledge.
 
    Designed for **high-security banking environments**, it provides traceability, audit logging, and data masking (PII/PCI) in a strictly local execution model.
@@ -29,7 +29,8 @@
 
 ### 🧠 Adaptive CRAG with LangGraph
 
-*   **Query Intent Analysis**: Incoming queries are classified into 4 intent types (`exact`, `conceptual`, `relational`, `file_discovery`) with automatic sub-question decomposition.
+*   **Query Intent Analysis**: Incoming queries are classified, and non-specific queries are decomposed into 3 sub-queries for parallel fuzzy searching.
+*   **Intelligent Retry**: Follows discovered context clues (Jira IDs, File Paths, Confluence Pages) on retry rounds instead of blindly re-searching.
 *   **Hybrid Retrieval**: BM25-scored ripgrep + ChromaDB vector search fused via Reciprocal Rank Fusion (RRF, k=60).
 *   **CRAG Evidence Grading**: Each evidence item is scored 0.0–1.0. Low-scored items (< 0.3) are filtered. The system routes to GENERATE (avg ≥ 0.7), REFINE (0.3–0.7), or RE-RETRIEVE (< 0.3).
 *   **Source Citations**: Answers include inline `[N]` references and a citation footer with file paths and line numbers.
@@ -84,8 +85,8 @@ graph TD
     Start(["🎯 User Query"]) --> Analyze
 
     subgraph "LangGraph StateGraph (max 3 iterations)"
-        Analyze["🧭 analyze_and_route<br/>Intent Classification + Query Decomposition<br/><i>LLM Call #1</i>"]
-        Plan["🧠 plan<br/>Tool Selection & Parameter Planning<br/><i>LLM Call #2</i>"]
+        Analyze["🧭 analyze_and_route<br/>Pre-Flight Checks<br/><i>Fast rule execution</i>"]
+        Plan["🧠 plan<br/>Intent Decomposition & Tool Selection<br/><i>LLM Call #1</i>"]
         ToolExec["🔍 tool_exec<br/>Execute Supported Tools:<br/>- hybrid_search<br/>- vector_search<br/>- grep_search<br/>- local_file_qa<br/>- read_file<br/>- graph_related<br/>- jira_fetch<br/>- confluence_fetch<br/>- web_fetch<br/>- index_command<br/><i>No LLM Call</i>"]
         Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #3</i>"]
         Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #4</i>"]
@@ -126,6 +127,7 @@ All nodes read from and write to a shared `AgentState`:
 | `routing_plan` | `dict` | Structured routing plan with suggested tools and keywords |
 | `sub_questions` | `list[str]` | Decomposed sub-questions for complex queries |
 | `context` | `list[str]` | Accumulated evidence from tools (with `[SOURCE:]` tags) |
+| `context_file_hints` | `list[str]` | Tracked clues (file paths, Jira IDs) across grading rounds |
 | `tool_history` | `list[dict]` | Log of tool invocations |
 | `evidence_scores` | `list[float]` | Relevance scores (0.0-1.0) from CRAG grader |
 | `grader_action` | `str` | CRAG decision: `GENERATE` / `REFINE` / `RE_RETRIEVE` |

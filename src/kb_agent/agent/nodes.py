@@ -277,9 +277,9 @@ def _extract_tools_from_text(
             
             # If we extracted an argument value AND it wasn't specially parsed by _build_tool_args
             # (e.g. for simple query search tools), update it.
-            if match and tool_name in ("grep_search", "vector_search", "local_file_qa", "read_file", "graph_related"):
-                tool_args = list(tool_args.keys())[0] # The key (e.g. 'query' or 'file_path')
-                tool_args = {tool_args: match.group(1)}
+            if match and tool_name in ("grep_search", "vector_search", "read_file", "graph_related"):
+                tool_args_key = list(tool_args.keys())[0] # The key (e.g. 'query' or 'file_path')
+                tool_args = {tool_args_key: match.group(1)}
 
             found.append({
                 "name": tool_name,
@@ -296,12 +296,11 @@ def _extract_tools_from_text(
 
 TOOL_DESCRIPTIONS = """Available tools:
 1. vector_search(query: str) — Semantic similarity search using ChromaDB embeddings. Best for conceptual/fuzzy queries. Returns JSON array of {id, content, metadata, score}.
-3. read_file(file_path: str) — Read the full content of a document by its file path. Use after search tools find relevant files.
+3. read_file(file_path: str, start_line: int=None, end_line: int=None) — Read the full content of a document, or a specific line range. Use after search tools find relevant files.
 4. graph_related(entity_id: str) — Find related entities in the Knowledge Graph (e.g. parent Jira ticket, linked pages). Input is an entity ID like 'PROJ-123' or 'document.md'.
 5. jira_fetch(issue_key: str) — Fetch a Jira issue by key (e.g. 'PROJ-123') or search text. Returns issue details.
 6. confluence_fetch(page_id: str) — Fetch a Confluence page by ID or search text.
-7. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches.
-8. local_file_qa(query: str) — Semantic search for local files. Returns a strict deduplicated numbered list of filenames (1, 2, 3...). Use this for file discovery intents (e.g., "Find files", "查找文档", "有哪些文件"). After the user sees this list, they will refer to files by number (e.g. "Summarize 1")."""
+7. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches."""
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +327,56 @@ PLAN_SYSTEM = (
     "   d) Call read_file(file_path=resolved_path).\n"
     "7. Do NOT call local_file_qa again if the user is asking to summarize a file from a list you just provided.\n"
     "8. Avoid repeating tool calls with the same arguments.\n"
-    "9. On subsequent rounds, try DIFFERENT search keywords, or use "
-    "read_file on files discovered in previous rounds.\n"
-    "10. Output ONLY the JSON array, no other text, no explanation.\n"
+    "9. On subsequent rounds, you will be given 'Context File Hints' (like file paths or Jira IDs) found in previous searches. You MUST prioritize using read_file, jira_fetch, or confluence_fetch on these hints BEFORE trying new vector_search keywords.\n"
+    "   - Only rephrase vector searches if no hints exist or hints proved useless.\n"
 )
+
+DECOMPOSE_SYSTEM = (
+    "You are a query analysis expert. Your job is to analyze the user's question and decide how to search the knowledge base.\n\n"
+    "RULES:\n"
+    "1. If the user asks about a specific Jira ticket (e.g., FSR-123, WCL-456, PROJ-789), output a 'direct' action for jira_fetch.\n"
+    "2. If the user asks about a specific Confluence page ID (e.g., 12345678), output a 'direct' action for confluence_fetch.\n"
+    "3. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
+    "   - Sub-queries should capture different aspects, synonyms, or keywords of the original question.\n"
+    "   - If the question is very simple, use slightly different phrasing for the 3 sub-queries to maximize recall.\n"
+    "   - MUST KEEP THE ORIGINAL LANGUAGE. DO NOT TRANSLATE TO ENGLISH IF THE QUERY IS IN CHINESE.\n"
+    "4. Output ONLY valid JSON matching this schema:\n"
+    '   - For direct: {"action": "direct", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}}\n'
+    '   - For decompose: {"action": "decompose", "sub_queries": ["query 1", "query 2", "query 3"]}\n'
+    "5. Do NOT output any other text or explanation."
+)
+
+def _decompose_query(query: str, state: AgentState) -> list[dict[str, Any]]:
+    """Use LLM to decompose a query into sub-queries or route to a specific tool."""
+    _emit(state, "🧠", "Analyzing query for decomposition or direct routing...")
+    
+    llm = _build_llm()
+    messages = [
+        SystemMessage(content=DECOMPOSE_SYSTEM),
+        HumanMessage(content=query)
+    ]
+    
+    response = _invoke_and_track(llm, messages, state)
+    raw = _strip_think_tags(response.content.strip())
+    
+    log_audit("agent_decompose_response", {"raw": raw[:200]})
+    
+    parsed = _extract_json(raw)
+    
+    if isinstance(parsed, dict):
+        action = parsed.get("action")
+        if action == "direct" and "tool" in parsed and "args" in parsed:
+            _emit(state, "🧭", f"LLM Routing: detected exact intent, routing to {parsed['tool']}.")
+            return [{"name": parsed["tool"], "args": parsed["args"]}]
+        elif action == "decompose" and isinstance(parsed.get("sub_queries"), list):
+            sub_queries = parsed["sub_queries"][:3] # cap at 3
+            if sub_queries:
+                _emit(state, "🔀", f"Decomposed into {len(sub_queries)} sub-queries for parallel search.")
+                return [{"name": "vector_search", "args": {"query": sq}} for sq in sub_queries]
+                
+    # Fallback if parsing fails or unexpected format
+    _emit(state, "⚠️", "Decomposition parse failed, falling back to original query.")
+    return [{"name": "vector_search", "args": {"query": query}}]
 
 
 def plan_node(state: AgentState) -> dict[str, Any]:
@@ -344,9 +389,38 @@ def plan_node(state: AgentState) -> dict[str, Any]:
         "context_count": len(state.get("context") or []),
     })
 
-    llm = _build_llm()
+    existing_context = state.get("context") or []
 
-    messages: list = [SystemMessage(content=PLAN_SYSTEM)]
+    # --- NEW RULE/LLM ROUTING FOR FIRST ITERATION ---
+    if iteration == 0 and not existing_context:
+        import re
+        query = state["query"]
+        
+        # 1. Very strict URL fast-path (bypasses LLM decompose)
+        url_match = re.search(r'https?://[^\s]+', query)
+        if url_match:
+            tool_calls = [{"name": "web_fetch", "args": {"url": url_match.group(0)}}]
+            _emit(state, "🧭", "Rule routing: detected URL, routing to web_fetch.")
+        else:
+            # 2. LLM decompose for Jira detection and vector search splitting
+            tool_calls = _decompose_query(query, state)
+            
+        return {
+            "pending_tool_calls": tool_calls,
+            "llm_call_count": state.get("llm_call_count", 0),
+            "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
+            "llm_completion_tokens": state.get("llm_completion_tokens", 0),
+            "llm_total_tokens": state.get("llm_total_tokens", 0),
+        }
+
+    grader_action = state.get("grader_action")
+    
+    # Let the LLM planner handle retry actions (REFINE/RE_RETRIEVE)
+    # The PLAN_SYSTEM prompt will guide it to follow context_file_hints
+    
+    # ── LLM Planner (iteration > 0 or normal planning) ──
+    llm = _build_llm()
+    messages = [SystemMessage(content=PLAN_SYSTEM)]
 
     # Inject conversation history
     history = state.get("messages") or []
@@ -361,23 +435,21 @@ def plan_node(state: AgentState) -> dict[str, Any]:
         prev_calls = ", ".join(
             f"{t['tool']}({t['input']})" for t in tool_history[-5:]
         )
-        # Show short snippet of what was found
-        ctx_snippets = []
-        for c in existing_context[-3:]:
-            snippet = c[:200] + "..." if len(c) > 200 else c
-            ctx_snippets.append(snippet)
-        ctx_summary = "\n".join(ctx_snippets)
+        
+        hints_text = ""
+        context_file_hints = state.get("context_file_hints") or []
+        if context_file_hints:
+            hints_text = "Context File Hints (clues found in previous rounds):\n" + "\n".join(f"- {h}" for h in context_file_hints) + "\n\n"
 
         messages.append(
             SystemMessage(
                 content=(
                     f"Previous tool calls: {prev_calls}\n\n"
-                    f"Evidence found so far:\n{ctx_summary}\n\n"
-                    "The evidence was deemed insufficient. "
-                    "You MUST try DIFFERENT tools or DIFFERENT search terms. "
-                    "If previous searches found file paths, use read_file. "
-                    "If vector_search didn't work, try vector_search with different wording. "
-                    "Do NOT repeat the same calls."
+                    f"{hints_text}"
+                    "The evidence found so far was deemed insufficient to answer the user's question. "
+                    "You MUST try DIFFERENT tools or DIFFERENT search terms.\n"
+                    "If 'Context File Hints' are provided above (file paths, Jira IDs), you MUST prioritize following those clues using read_file, jira_fetch, etc., rather than blindly rephrasing vector searches.\n"
+                    "Do NOT repeat the exact same tool calls."
                 )
             )
         )
@@ -563,6 +635,26 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             "result_preview": result_preview,
         })
 
+        is_error = False
+        try:
+            parsed = json.loads(result_str)
+            if isinstance(parsed, dict) and parsed.get("status") == "error":
+                is_error = True
+            elif isinstance(parsed, list) and len(parsed) > 0:
+                is_error = all(item.get("metadata", {}).get("error") for item in parsed if isinstance(item, dict))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        if is_error or result_str.startswith("Tool error"):
+            _emit(state, "⚠️", f"{tool_name} returned error: {result_preview}")
+            new_tool_history.append({
+                "tool": tool_name,
+                "input": tool_args,
+                "output": result_str[:500],
+                "error": True
+            })
+            continue
+
         extra_info = ""
         try:
             parsed_json = json.loads(result_str)
@@ -604,10 +696,14 @@ def tool_node(state: AgentState) -> dict[str, Any]:
                 for item in parsed_res:
                     path = item.get("file_path") or item.get("metadata", {}).get("path") or item.get("metadata", {}).get("source") or item.get("id")
                     line = item.get("line") or item.get("metadata", {}).get("line") or "1"
+                    score = item.get("score")
                     content = item.get("content", str(item))
                     
                     if path:
-                        formatted_items.append(f"[SOURCE:{path}:L{line}] {content}")
+                        if score is not None:
+                            formatted_items.append(f"[SOURCE:{path}:L{line}:S{score:.4f}] {content}")
+                        else:
+                            formatted_items.append(f"[SOURCE:{path}:L{line}] {content}")
                     else:
                         formatted_items.append(str(item))
                 
@@ -635,6 +731,40 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             "input": tool_args,
             "output": result_str[:500],
         })
+
+    if len(pending) > 1 and "vector_search" in [t["name"] for t in pending]:
+        _emit(state, "🧹", "Deduplicating chunks from parallel searches...")
+        unique_chunks: dict[str, str] = {}
+        for item in new_context:
+            import re
+            # Extract basic id ([SOURCE:file_path:Lline) and score if present
+            # Format: [SOURCE:path:Lline:Sscore] content
+            match = re.search(r'^\[SOURCE:(.+?:L\d+)(?::S([0-9.]+))?\]', item)
+            if match:
+                chunk_id = match.group(1)
+                score = float(match.group(2)) if match.group(2) else 0.0
+                
+                if chunk_id in unique_chunks:
+                    # Keep the one with higher score
+                    existing_match = re.search(r'^\[SOURCE:.+?:L\d+(?::S([0-9.]+))?\]', unique_chunks[chunk_id])
+                    existing_score = float(existing_match.group(1)) if existing_match and existing_match.group(1) else 0.0
+                    if score > existing_score:
+                        unique_chunks[chunk_id] = item
+                else:
+                    unique_chunks[chunk_id] = item
+            else:
+                # If it doesn't match the format, it's not a chunk, just keep it (e.g., from web_fetch)
+                unique_chunks[item] = item
+                
+        deduped_context = list(unique_chunks.values())
+        if len(deduped_context) < len(new_context):
+            _emit(state, "🧹", f"Deduplicated context from {len(new_context)} to {len(deduped_context)} items.")
+        new_context = deduped_context
+
+    # Ensure context count isn't too extreme for the LLM
+    if len(new_context) > 50:
+        _emit(state, "⚠️", f"Truncating context from {len(new_context)} to 50 items to fit context window.")
+        new_context = new_context[:50]
 
     log_audit("tool_node_complete", {
         "tools_executed": len(pending),
@@ -779,8 +909,9 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
         if score > 0.0:
             filtered_context.append(item)
 
-    # Calculate average score for routing decision
     avg_score = sum(scores) / len(scores) if scores else 0.0
+    
+    context_file_hints = state.get("context_file_hints", [])
     
     # Adaptive decision
     if avg_score >= 0.7:
@@ -789,9 +920,11 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
     elif avg_score >= 0.3:
         action = "REFINE"
         _emit(state, "🔄", "Evidence partially relevant, refining plan.")
+        context_file_hints = _extract_hints_from_context(context_items, context_file_hints)
     else:
         action = "RE_RETRIEVE"
         _emit(state, "🗑️", "Evidence irrelevant, restarting retrieval.")
+        context_file_hints = _extract_hints_from_context(context_items, context_file_hints)
 
     log_audit("grade_evidence_result", {
         "iteration": iteration,
@@ -803,6 +936,7 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
     return {
         "iteration": iteration,
         "context": filtered_context,  # Update state with filtered context
+        "context_file_hints": context_file_hints,
         "evidence_scores": scores,
         "grader_action": action,
         "llm_call_count": state.get("llm_call_count", 0),
@@ -810,6 +944,33 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
         "llm_completion_tokens": state.get("llm_completion_tokens", 0),
         "llm_total_tokens": state.get("llm_total_tokens", 0),
     }
+
+def _extract_hints_from_context(context_items: list[str], existing_hints: list[str]) -> list[str]:
+    """Extract actionable hints (file paths, Jira keys, Confluence logic) from context items."""
+    import re
+    hints = set(existing_hints)
+    
+    for item in context_items:
+        # 1. File paths from tags [SOURCE:file_path...]
+        path_matches = re.finditer(r'\[SOURCE:([^:]+)', item)
+        for match in path_matches:
+            hint = match.group(1).strip()
+            if hint and not hint.startswith("http") and not re.match(r'^[A-Z]+-\d+$', hint):
+                hints.add(hint)
+                
+        # 2. Jira ticket IDs
+        jira_matches = re.finditer(r'\b([A-Z]+-\d+)\b', item)
+        for match in jira_matches:
+            hints.add(match.group(1))
+            
+        # 3. Confluence Page IDs (crude proxy: 5+ digit numbers that might be IDs)
+        # Often they appear near words like 'page', 'confluence', 'wiki'
+        # For safety we just grab exact matches of page indicators
+        page_matches = re.finditer(r'(?:page|confluence\s+id)[:\s]+(\d{5,})', item, re.IGNORECASE)
+        for match in page_matches:
+            hints.add(f"Confluence Page ID: {match.group(1)}")
+            
+    return list(hints)
 
 
 # ---------------------------------------------------------------------------
@@ -820,21 +981,18 @@ SYNTHESIZE_SYSTEM = (
     "You are a helpful knowledge base assistant. Answer the user's question "
     "primarily based on the provided context and conversation history.\n\n"
     "RULES:\n"
-    "1. Answer using the provided evidence. If the context only partially answers the query, "
-    "   provide a BEST-EFFORT response using the available information.\n"
-    "2. If the retrieved context is completely empty or devoid of any related signal at all, you MUST respond with:\n"
+    "1. **Be thorough**: Extract ALL relevant details, data points, and specific "
+    "   information from the evidence. Do NOT summarize away important details.\n"
+    "2. If the evidence contains structured data (tables, lists, technical specs), "
+    "   reproduce them in your answer, not just paraphrase.\n"
+    "3. Structure your response using headers (##), bullet points, and formatting "
+    "   for readability. Long, well-structured answers are PREFERRED over short ones.\n"
+    "4. If the retrieved context is completely empty or devoid of any related signal at all, you MUST respond with:\n"
     "   'I couldn't find relevant information in the knowledge base to answer this question.'\n"
-    "3. You MAY use your general knowledge to interpret or glue these facts together. If you provide "
+    "5. You MAY use your general knowledge to interpret or glue these facts together. If you provide "
     "   assumptions or explanations beyond the provided text, clearly state that you are doing so.\n"
-    "4. **FILE LIST vs CONTENT**:\n"
-    "   a) If the user's intent is to 'Find/Search' for files, and the context "
-    "      contains a numbered list (from `local_file_qa`), output ONLY that list.\n"
-    "   b) If the user's intent is to 'Summarize' or ask about a SPECIFIC file "
-    "      content (from `read_file`), you MUST use the file content to answer. "
-    "      Do NOT repeat the numbered list in this case.\n"
-    "5. Be precise, professional, and well-structured.\n"
     "6. **CITATIONS**: You MUST cite your sources using bracketed numbers, e.g., [1], [2].\n"
-    "   The context items provided will contain markers like [SOURCE:path/to/file.md:L123].\n"
+    "   The context items provided will contain markers like [SOURCE:path/to/file.md:L123] or [SOURCE:path:L123:S0.95].\n"
     "   When you use information from an item, append its corresponding number to the sentence.\n"
 )
 
@@ -904,23 +1062,42 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
     messages.extend(_history_to_messages(history))
 
     # Format context with explicit numbers for citation mapping
-    sources = []
+    sources_list = []
     ctx_blocks = []
+    seen_sources = set()
     
     import re
     
-    for i, item in enumerate(context_items, 1):
+    for item in context_items:
         # Extract the source reference if it exists
-        source_match = re.search(r'\[SOURCE:(.+?):L(\d+)\]', item)
+        source_match = re.search(r'\[SOURCE:(.+?):L(\d+)(?::S([0-9.]+))?\]\s*(.*)', item, re.DOTALL)
         if source_match:
-            path, line = source_match.groups()
-            sources.append(f"[{i}] {path} (Line {line})")
+            path, line, score_str, content = source_match.groups()
+            score = float(score_str) if score_str else None
+            key = (path, line)
+            if key not in seen_sources:
+                seen_sources.add(key)
+                sources_list.append({
+                    "path": path,
+                    "line": line,
+                    "score": score,
+                    "content": content.strip()  # Pass full content for the TUI Modal
+                })
+                # Re-index citations consecutively for the LLM prompt
+                ctx_blocks.append(f"--- Evidence [{len(sources_list)}] ---\n{item}")
         else:
             # Fallback for unformatted items
-            sources.append(f"[{i}] Knowledge Base Item")
+            key = ("Knowledge Base Item", str(len(seen_sources) + 1))
+            if key not in seen_sources:
+                seen_sources.add(key)
+                sources_list.append({
+                    "path": "Knowledge Base Item",
+                    "line": "1",
+                    "score": None,
+                    "content": item.strip()
+                })
+                ctx_blocks.append(f"--- Evidence [{len(sources_list)}] ---\n{item}")
             
-        ctx_blocks.append(f"--- Evidence [{i}] ---\n{item}")
-        
     ctx_text = "\n\n".join(ctx_blocks) if ctx_blocks else "(No evidence was found.)"
 
     messages.append(
@@ -931,11 +1108,6 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
 
     response = _invoke_and_track(llm, messages, state)
     raw_answer = _strip_think_tags(response.content)
-
-    # Append citation footer if answer was generated and sources exist
-    if sources and "I couldn't find relevant information" not in raw_answer:
-        footer = "\n\n---\n**Sources:**\n" + "\n".join(sources)
-        raw_answer += footer
 
     log_audit("synthesize_result", {
         "answer_length": len(raw_answer),
@@ -958,6 +1130,7 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "final_answer": final_answer,
+        "sources": sources_list,
         "llm_call_count": state.get("llm_call_count", 0),
         "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
         "llm_completion_tokens": state.get("llm_completion_tokens", 0),

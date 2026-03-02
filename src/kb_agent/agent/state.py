@@ -43,6 +43,9 @@ class AgentState(TypedDict, total=False):
     files_read: list[str]
     """Paths already read — used to de-duplicate file reads."""
 
+    context_file_hints: list[str]
+    """Clues (file paths, Jira ticket IDs, Confluence pages) extracted from context for retry rounds."""
+
     # ── Planner output (tool calls for next step) ─────────────────────────
     pending_tool_calls: list[dict[str, Any]]
     """Tool calls selected by planner: [{name, args}, ...]. JSON-serializable."""
@@ -57,6 +60,9 @@ class AgentState(TypedDict, total=False):
     # ── Output ────────────────────────────────────────────────────────────
     final_answer: str
     """The synthesised answer returned to the user."""
+
+    sources: list[dict[str, Any]]
+    """Structured list of sources cited in the final answer."""
 
     # ── TUI integration ───────────────────────────────────────────────────
     status_callback: Any

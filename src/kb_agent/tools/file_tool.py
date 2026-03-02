@@ -14,7 +14,7 @@ class FileTool:
             if settings.index_path:
                 self.allowed_paths.append(settings.index_path.resolve())
 
-    def read_file(self, file_path: str) -> str:
+    def read_file(self, file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """
         Reads a file from the allowed directories. Returns content or a descriptive error string.
         """
@@ -38,6 +38,22 @@ class FileTool:
             if not path.is_file():
                 return f"[ERROR: NOT_A_FILE] Path '{file_path}' is a directory, not a file."
 
-            return path.read_text(encoding="utf-8", errors="replace")
+            content = path.read_text(encoding="utf-8", errors="replace")
+            
+            if start_line is not None or end_line is not None:
+                lines = content.splitlines(True)
+                total_lines = len(lines)
+                
+                start = max(1, start_line) if start_line is not None else 1
+                end = min(total_lines, end_line) if end_line is not None else total_lines
+                
+                if start > end:
+                    start, end = end, start
+                
+                selected_lines = lines[start-1:end]
+                header = f"[Lines {start}-{end} of {file_path}]\n"
+                return header + "".join(selected_lines)
+                
+            return content
         except Exception as e:
             return f"[ERROR: READ_FAILED] Unexpected error reading {file_path}: {str(e)}"

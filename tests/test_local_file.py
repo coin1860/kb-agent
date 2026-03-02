@@ -35,7 +35,7 @@ def test_pdf_extraction_structural_boundaries(tmp_path: Path):
     
     # Assert discovery
     assert len(results) == 1
-    assert results[0]["id"] == "test_document.pdf"
+    assert results[0]["id"] == "test_document"
     
     # Assert metadata
     assert results[0]["metadata"]["type"] == ".pdf"

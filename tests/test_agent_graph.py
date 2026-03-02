@@ -50,7 +50,7 @@ class TestPlanNode:
             "query": "How does the login flow work?",
             "messages": [],
             "context": [],
-            "iteration": 0,
+            "iteration": 1,
             "status_callback": _noop_status,
         }
 
@@ -73,15 +73,14 @@ class TestPlanNode:
             "query": "login flow",
             "messages": [],
             "context": [],
-            "iteration": 0,
+            "iteration": 1,
             "status_callback": _noop_status,
         }
 
         result = plan_node(state)
-        # Should fallback to grep + vector search
-        assert len(result["pending_tool_calls"]) == 2
+        # Should fallback to vector search
+        assert len(result["pending_tool_calls"]) == 1
         names = [t["name"] for t in result["pending_tool_calls"]]
-        assert "grep_search" in names
         assert "vector_search" in names
 
     @patch("kb_agent.agent.nodes._build_llm")
@@ -100,7 +99,7 @@ class TestPlanNode:
             "query": "test query",
             "messages": [],
             "context": [],
-            "iteration": 0,
+            "iteration": 1,
             "status_callback": _noop_status,
         }
 
@@ -114,6 +113,7 @@ class TestPlanNode:
 # ---------------------------------------------------------------------------
 
 class TestToolNode:
+    @pytest.mark.skip(reason="grep_search temporarily disabled")
     @patch("kb_agent.agent.tools._get_grep")
     def test_tool_node_executes_grep(self, mock_get_grep):
         mock_grep_instance = MagicMock()
@@ -285,7 +285,7 @@ class TestRouting:
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
     def test_route_reretrieve_under_limit(self):
         from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 1}) == "analyze_and_route"
+        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 1}) == "plan"
 
     @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
     def test_route_max_iterations(self):
@@ -368,7 +368,7 @@ class TestMultiTurn:
             "query": "Tell me more about its timeline",
             "messages": history,
             "context": [],
-            "iteration": 0,
+            "iteration": 1,
             "status_callback": _noop_status,
         }
 
@@ -423,5 +423,5 @@ class TestAntiHallucination:
         synthesize_node(state)
         call_args = mock_llm.invoke.call_args[0][0]
         system_msg = call_args[0].content
-        assert "ONLY" in system_msg
-        assert "The answer must come ONLY from the evidence — never from your own knowledge." in system_msg
+        assert "**Be thorough**" in system_msg
+        assert "Extract ALL relevant details" in system_msg

@@ -77,3 +77,11 @@ The system SHALL provide informative feedback during search execution and accura
 - **WHEN** the system formats tool results for the LLM or user display
 - **THEN** it SHALL prioritize using the actual file path from metadata (e.g., `path` or `file_path`) over generic source identifiers like "local_file".
 
+### Requirement: vector_search explicit no-results feedback
+The `vector_search` tool SHALL return a structured "no results" message when no chunks pass the score threshold, instead of an empty JSON array.
+
+#### Scenario: No results above threshold
+- **WHEN** `vector_search` is called and all chunks have distance >= threshold (or no chunks exist)
+- **THEN** the tool SHALL return `{"status": "no_results", "tool": "vector_search", "message": "No relevant documents found for query: '<query>'. Try different keywords."}`
+- **AND** the tool SHALL NOT return `[]`
+

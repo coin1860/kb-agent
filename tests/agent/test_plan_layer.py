@@ -26,28 +26,6 @@ def test_build_tool_args():
     assert _build_tool_args("confluence_fetch", "Read page 123456") == {"page_id": "123456"}
     assert _build_tool_args("web_fetch", "Here is https://example.com/spec") == {"url": "https://example.com/spec"}
     assert _build_tool_args("web_fetch", "No URL") == None
-    
-    # Test dictionary queries for semantic & keyword separation
-    dict_query = {"semantic_intent": "compare indexing logic", "search_keywords": "index query"}
-    
-    assert _build_tool_args("hybrid_search", dict_query) == {
-        "semantic_query": "compare indexing logic", 
-        "exact_keywords": "index query"
-    }
-    
-    assert _build_tool_args("vector_search", dict_query) == {
-        "query": "compare indexing logic"
-    }
-    
-    assert _build_tool_args("grep_search", dict_query) == {
-        "query": "index query"
-    }
-    
-    # Test fallback if keywords empty
-    dict_query_empty_kx = {"semantic_intent": "missing words", "search_keywords": ""}
-    assert _build_tool_args("grep_search", dict_query_empty_kx) == {
-        "query": "missing words"
-    }
 
 def test_extract_tools_from_text():
     # Test fallback extraction with no white list

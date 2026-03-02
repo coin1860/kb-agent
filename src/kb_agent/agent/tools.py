@@ -27,6 +27,12 @@ _web: object | None = None
 _local_qa: object | None = None
 
 
+def reset_tools_cache():
+    """Clear the cached tool instances so they pick up new settings on next use."""
+    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa
+    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = None
+
+
 def _get_grep():
     global _grep
     if _grep is None:
@@ -132,23 +138,32 @@ def vector_search(query: str) -> str:
         JSON array of matches with id, content snippet, metadata, and score.
     """
     results = _get_vector().search(query, n_results=5)
+    if not results:
+        return json.dumps({
+            "status": "no_results",
+            "tool": "vector_search",
+            "message": f"No relevant documents found for query: '{query}'. Try different keywords."
+        }, ensure_ascii=False)
     return json.dumps(results[:10], ensure_ascii=False)
 
 
 @tool
-def read_file(file_path: str) -> str:
-    """Read the full content of a document file by its path.
+def read_file(file_path: str, start_line: int = None, end_line: int = None) -> str:
+    """Read the full content of a document file by its path, or a specific line range.
 
     Use this after grep_search or vector_search identifies a relevant file
-    and you need the complete content for context.
+    and you need the complete content for context. Provide start_line and end_line
+    to read only a specific section.
 
     Args:
         file_path: Path to the file to read (relative or absolute).
+        start_line: Optional starting line number (1-indexed).
+        end_line: Optional ending line number (inclusive).
 
     Returns:
         The file content as a string, or a descriptive error message.
     """
-    content = _get_file().read_file(file_path)
+    content = _get_file().read_file(file_path, start_line, end_line)
     if len(content) > 8000:
         return content[:8000] + "\n... (truncated)"
     return content
@@ -168,6 +183,12 @@ def graph_related(entity_id: str) -> str:
         JSON array of related nodes with node id, type, relation, and direction.
     """
     results = _get_graph().get_related_nodes(entity_id)
+    if not results:
+        return json.dumps({
+            "status": "no_results",
+            "tool": "graph_related",
+            "message": f"No related entities found for '{entity_id}'."
+        }, ensure_ascii=False)
     return json.dumps(results[:20], ensure_ascii=False)
 
 
@@ -248,9 +269,8 @@ ALL_TOOLS = [
     # grep_search, # TEMPORARILY DISABLED
     vector_search,
     read_file,
-    graph_related,
+    # graph_related,
     jira_fetch,
     confluence_fetch,
-    web_fetch,
-    local_file_qa
+    web_fetch
 ]

@@ -24,7 +24,7 @@ async def test_search_for_mexico_payment_files(MockLLM, MockGraph):
     # 3.1 Verify query returns the formatted table
     history1 = []
     
-    response = engine.answer_query("Find Mexico payment files", history=history1, mode="knowledge_base")
+    response, _ = engine.answer_query("Find Mexico payment files", history=history1, mode="knowledge_base")
             
     print("RESPONSE 1:", response)
     
@@ -36,7 +36,7 @@ async def test_search_for_mexico_payment_files(MockLLM, MockGraph):
     history1.append({"role": "assistant", "content": response})
 
     # 3.2 Verify follow-up file summarization
-    response2 = engine.answer_query("Summarize file 1", history=history1, mode="knowledge_base")
+    response2, _ = engine.answer_query("Summarize file 1", history=history1, mode="knowledge_base")
             
     print("RESPONSE 2:", response2)
     assert len(response2) > 50 # Basic check that a summary was generated

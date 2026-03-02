@@ -28,7 +28,7 @@ class TestEngineNormalMode:
         from kb_agent.engine import Engine
         engine = Engine()
 
-        answer = engine.answer_query("hi", mode="normal")
+        answer, _ = engine.answer_query("hi", mode="normal")
 
         assert "Hello from normal mode!" in answer
         mock_llm.chat_completion.assert_called_once()
@@ -49,7 +49,7 @@ class TestEngineNormalMode:
             {"role": "assistant", "content": "Hello!"},
         ]
 
-        answer = engine.answer_query("Tell me more", mode="normal", history=history)
+        answer, _ = engine.answer_query("Tell me more", mode="normal", history=history)
 
         args, kwargs = mock_llm.chat_completion.call_args
         messages = args[0]
@@ -73,7 +73,7 @@ class TestEngineKBMode:
         from kb_agent.engine import Engine
         engine = Engine()
 
-        answer = engine.answer_query("What is the status of Project X?")
+        answer, _ = engine.answer_query("What is the status of Project X?")
 
         assert "on track" in answer
         mock_graph.invoke.assert_called_once()
@@ -99,7 +99,7 @@ class TestEngineKBMode:
             {"role": "assistant", "content": "Project X is..."},
         ]
 
-        answer = engine.answer_query("Tell me more", history=history)
+        answer, _ = engine.answer_query("Tell me more", history=history)
 
         call_args = mock_graph.invoke.call_args[0][0]
         assert call_args["messages"] == history
@@ -113,7 +113,7 @@ class TestEngineKBMode:
         from kb_agent.engine import Engine
         engine = Engine()
 
-        answer = engine.answer_query("Unknown topic")
+        answer, _ = engine.answer_query("Unknown topic")
 
         assert "couldn't find" in answer.lower()
 
@@ -126,7 +126,7 @@ class TestEngineKBMode:
         from kb_agent.engine import Engine
         engine = Engine()
 
-        answer = engine.answer_query("test query")
+        answer, _ = engine.answer_query("test query")
 
         assert "error" in answer.lower()
 
@@ -140,7 +140,7 @@ class TestEngineKBMode:
         engine = Engine()
 
         status_calls = []
-        answer = engine.answer_query(
+        answer, _ = engine.answer_query(
             "test",
             on_status=lambda e, m: status_calls.append((e, m)),
         )
@@ -175,7 +175,7 @@ class TestEngineURLMode:
         from kb_agent.engine import Engine
         engine = Engine()
 
-        answer = engine.answer_query("https://example.com what is this?")
+        answer, _ = engine.answer_query("https://example.com what is this?")
 
         assert "Summary" in answer
         mock_web.fetch_data.assert_called_once()
