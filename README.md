@@ -7,8 +7,9 @@
 
    **A Next-Generation Agentic Knowledge System for Internal Banking Documents.**
 
-![UI Screenshot](docs/image/ui.png)
 ![Terminal Concept](docs/image/image.png)
+![UI Screenshot](docs/image/ui.png)
+
 
 ## 📖 Introduction
 
