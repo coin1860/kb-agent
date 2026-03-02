@@ -1,4 +1,4 @@
-# Jules KB Agent
+# GTS KB Agent
 
    [Backend](https://img.shields.io/badge/Backend-Python_3.10+-blue?style=flat-square)
    [UI](https://img.shields.io/badge/UI-Textual_TUI-green?style=flat-square)
@@ -7,9 +7,12 @@
 
    **A Next-Generation Agentic Knowledge System for Internal Banking Documents.**
 
+![UI Screenshot](docs/image/ui.png)
+![Terminal Concept](docs/image/image.png)
+
 ## 📖 Introduction
 
-   **Jules KB Agent** is an advanced, local-first knowledge retrieval system designed to bridge the gap between unstructured documentation (Markdown, Word, Excel) and structured architectural knowledge. Unlike traditional RAG systems that rely solely on vector similarity, this system employs a **6-node Adaptive CRAG (Corrective RAG) Workflow** powered by **LangGraph** that autonomously:
+   **GTS KB Agent** is an advanced, local-first knowledge retrieval system designed to bridge the gap between unstructured documentation (Markdown, Word, Excel, PDF) and structured architectural knowledge. Unlike traditional RAG systems that rely solely on vector similarity, this system employs an **Adaptive CRAG Workflow** powered by **LangGraph** that autonomously:
 
     1. **Analyzes** query intent and classifies it (exact / conceptual / relational / file_discovery).
     2. **Plans** which tools to call based on the routing plan and gathered evidence.
@@ -35,7 +38,7 @@
 
 > 📖 **[Architecture Deep-Dive →](docs/agentic-rag-architecture.md)** — Mermaid diagrams, LLM call analysis, and enhancement roadmap.
 
-### 🔧 Nine Agent Tools
+### 🔧 Agent Tools
 
 | Tool | Backend | Purpose |
 |---|---|---|
@@ -44,10 +47,11 @@
 | `hybrid_search` | Grep + Vector + RRF | Combined keyword and semantic fusion |
 | `read_file` | FileTool | Read full document content by path |
 | `graph_related` | NetworkX | Traverse Knowledge Graph relationships |
-| `local_file_qa` | Vector + Filename | File discovery and listing |
+| `local_file_qa` | Vector + Filename | File discovery and Q&A on specific code repositories/files |
 | `jira_fetch` | Jira REST API | Fetch Jira issue details by key |
 | `confluence_fetch` | Confluence REST API | Fetch Confluence page by ID/title |
 | `web_fetch` | HTTP + HTML→MD | Fetch and convert web pages |
+| `index_command` | CLI/TUI | /index command to ingest external resources automatically |
 
 ### 🕸️ Knowledge Graph Power
 
@@ -81,7 +85,7 @@ graph TD
     subgraph "LangGraph StateGraph (max 3 iterations)"
         Analyze["🧭 analyze_and_route<br/>Intent Classification + Query Decomposition<br/><i>LLM Call #1</i>"]
         Plan["🧠 plan<br/>Tool Selection & Parameter Planning<br/><i>LLM Call #2</i>"]
-        ToolExec["🔍 tool_exec<br/>Execute Tool Calls<br/><i>No LLM Call</i>"]
+        ToolExec["🔍 tool_exec<br/>Execute Supported Tools:<br/>- hybrid_search<br/>- vector_search<br/>- grep_search<br/>- local_file_qa<br/>- read_file<br/>- graph_related<br/>- jira_fetch<br/>- confluence_fetch<br/>- web_fetch<br/>- index_command<br/><i>No LLM Call</i>"]
         Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #3</i>"]
         Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #4</i>"]
 
@@ -277,4 +281,4 @@ python3 -m pytest tests/ -v
 
 ---
 
-© 2026 Jules Agent Team | Internal Use Only
+© 2026 GTS Agent Team | Internal Use Only
