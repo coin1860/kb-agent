@@ -1,3 +1,8 @@
+---
+title: Semantic Chunking
+domain: ingestion
+---
+
 # semantic-chunking Specification
 
 ## Purpose

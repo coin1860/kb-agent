@@ -1,3 +1,8 @@
+---
+title: Adaptive Query Routing
+domain: routing
+---
+
 # adaptive-query-routing Specification
 
 ## Purpose

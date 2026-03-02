@@ -1,3 +1,8 @@
+---
+title: Hybrid Retrieval
+domain: retrieval
+---
+
 # hybrid-retrieval Specification
 
 ## Purpose

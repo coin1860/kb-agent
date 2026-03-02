@@ -1,3 +1,8 @@
+---
+title: Fast Path Classifier
+domain: routing
+---
+
 # fast-path-classifier Specification
 
 ## Purpose

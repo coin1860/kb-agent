@@ -1,3 +1,8 @@
+---
+title: Query Engine
+domain: routing
+---
+
 # query-engine Specification
 
 ## Purpose
@@ -72,7 +77,7 @@ The system SHALL include source citations in the synthesized answer, referencing
 - **AND** the final answer contains only exactly one correct `LLM Usage Stats` block appended by the system.
 
 ### Requirement: Automatic web URL resolution
-The system SHALL intercept HTTP URLs in user queries, fetch their content, and use it as ad-hoc context to answer the user's question, bypassing the standard RAG or local index database.
+The system SHALL intercept HTTP URLs in user queries, fetch their content, and use it as ad-hoc context to answer the user's question, bypassing the standard RAG or local index database. When fetching raw HTML, the system must robustly filter out non-content elements without inadvertently destroying the main article container itself.
 
 #### Scenario: Query contains a URL
 - **WHEN** the user provides the query "Summarize this page https://example.com/spec"
@@ -80,4 +85,21 @@ The system SHALL intercept HTTP URLs in user queries, fetch their content, and u
 - **AND** the system fetches the web content
 - **AND** the system optionally processes it into the index if in knowledge_base mode
 - **AND** the system answers the user's implicit or explicit question using only that fetched content
+
+#### Scenario: Aggressive Layouts (e.g., GitHub Repos)
+- **WHEN** the `web_connector` (via `markdownify` engine) processes a page with layout parent classes containing "sidebar" or "banner"
+- **THEN** the system SHALL extract the localized `main_content` node based on tag heuristics (`<article>`, `<main>`, etc.) first
+- **AND** apply CSS-selector-based destructive filtering (e.g. `[class*='sidebar']`) ONLY to the descendants inside this localized subtree
+- **AND** preserve the top-level main/article wrapper content itself 
+- **AND** successfully convert the rich content to Markdown without truncation
+
+### Requirement: Contextual File Q&A
+The planner agent SHALL be able to explicitly resolve an index number (e.g., "1") to a specific filename when the user asks a follow-up question based on the `LocalFileQATool`'s table output.
+
+#### Scenario: User asks to summarize file 1
+- **WHEN** the user says "Summarize file 1"
+- **AND** the conversation history contains a `LocalFileQATool` result table
+- **THEN** the planner agent looks up the filename corresponding to index `1`
+- **AND** the planner agent calls the `read_file` tool with that specific filename
+- **AND** the synthesizer returns a summary based strictly on that file
 

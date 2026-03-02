@@ -1,3 +1,8 @@
+---
+title: Index Command
+domain: ingestion
+---
+
 # index-command Specification
 
 ## Purpose

@@ -1,3 +1,8 @@
+---
+title: Planner Tool Guard
+domain: guard
+---
+
 # planner-tool-guard Specification
 
 ## Purpose

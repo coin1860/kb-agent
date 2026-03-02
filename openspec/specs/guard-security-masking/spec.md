@@ -1,3 +1,8 @@
+---
+title: Security Masking
+domain: guard
+---
+
 # security-masking Specification
 
 ## Purpose

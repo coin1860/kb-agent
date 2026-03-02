@@ -1,3 +1,8 @@
+---
+title: Indexing Pipeline
+domain: ingestion
+---
+
 # indexing-pipeline Specification
 
 ## Purpose

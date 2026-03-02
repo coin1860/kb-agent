@@ -1,3 +1,8 @@
+---
+title: Corrective RAG
+domain: synthesis
+---
+
 # corrective-rag Specification
 
 ## Purpose

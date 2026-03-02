@@ -1,3 +1,8 @@
+---
+title: LLM Usage Tracking
+domain: obs
+---
+
 # llm-usage-tracking Specification
 
 ## Purpose
