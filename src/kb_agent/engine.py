@@ -21,8 +21,10 @@ from kb_agent.processor import Processor
 # Agentic RAG (LangGraph)
 from kb_agent.agent.graph import compile_graph
 
-# Regex to detect URLs in user input
+# Regex to detect URLs, Jira tickets, and Confluence page IDs
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
+_JIRA_PATTERN = re.compile(r'^[A-Z][A-Z0-9]+-\d+$', re.IGNORECASE)
+_CONFLUENCE_PATTERN = re.compile(r'^\d+$')
 
 logger = logging.getLogger("kb_agent_audit")
 
@@ -35,6 +37,13 @@ class Engine:
 
         # Compile the agentic RAG graph once
         self._graph = compile_graph()
+
+    def _get_processor(self) -> Processor:
+        """Lazy load processor to avoid circular imports or early config checks."""
+        import kb_agent.config as config
+        if config.settings and config.settings.index_path:
+            return Processor(config.settings.index_path)
+        return Processor(Path("index"))
 
     # ------------------------------------------------------------------
     # Public API
@@ -186,3 +195,87 @@ class Engine:
         raw_response = self.llm.chat_completion(messages)
         log_llm_response(user_prompt, raw_response)
         return Security.mask_sensitive_data(raw_response)
+
+    def index_resource(self, url_or_id: str, on_status=None) -> str:
+        """
+        Fetch an external resource (URL, Jira, Confluence), convert it to Markdown,
+        and ingest it into the vector index.
+        """
+        def _status(emoji, msg):
+            if on_status:
+                on_status(emoji, msg)
+
+        target = url_or_id.strip()
+
+        # Route to appropriate connector
+        if _URL_PATTERN.match(target):
+            _status("🌐", f"Fetching Web URL: {target}...")
+            docs = self.web_connector.fetch_data(target)
+        elif _JIRA_PATTERN.match(target):
+            _status("🎫", f"Fetching Jira Ticket: {target}...")
+            from kb_agent.connectors.jira import JiraConnector
+            docs = JiraConnector().fetch_data(target)
+        elif _CONFLUENCE_PATTERN.match(target):
+            _status("📄", f"Fetching Confluence Page: {target}...")
+            from kb_agent.connectors.confluence import ConfluenceConnector
+            docs = ConfluenceConnector().fetch_data(target)
+        else:
+            msg = f"Unrecognized resource format: {target}. Please provide a valid URL, Jira ID (e.g., PROJ-123), or Confluence Page ID."
+            _status("❌", msg)
+            return msg
+
+        if not docs:
+            msg = f"Failed to fetch content from {target}."
+            _status("❌", msg)
+            return msg
+
+        # Ensure index_path exists and write the docs
+        import os
+        import kb_agent.config as config
+        settings = config.settings
+
+        index_dir = settings.index_path if settings else Path("index")
+        os.makedirs(index_dir, exist_ok=True)
+        
+        processor = self._get_processor()
+        success_count = 0
+        errors = []
+
+        for doc in docs:
+            # Handle connector-level errors gracefully
+            if doc.get("metadata", {}).get("error"):
+                errors.append(doc.get('content', 'Unknown fetch error'))
+                continue
+
+            # Save the raw MD file to the index directory
+            # For web links or arbitrary content, generate a safe filename
+            doc_id = doc.get("id", "doc")
+            safe_filename = re.sub(r'[^A-Za-z0-9_\-]', '_', str(doc_id)) + ".md"
+            file_path = index_dir / safe_filename
+            
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(doc.get("content", ""))
+                _status("💾", f"Saved Markdown to {file_path}")
+                
+                # Update the doc metadata with its new local path so Processor uses it correctly
+                doc.setdefault("metadata", {})["path"] = str(file_path)
+                
+                # Ingest strictly into Chroma
+                _status("🧠", f"Ingesting into Data Store...")
+                processor.process(doc)
+                log_audit("index_resource", {"target": target, "doc_id": doc_id})
+                success_count += 1
+            except Exception as e:
+                logger.warning(f"Processor failed for {target}: {e}")
+                errors.append(str(e))
+
+        if errors:
+            err_msg = "; ".join(errors)
+            msg = f"Error processing {target}: {err_msg}"
+            _status("⚠️", msg)
+            return msg
+        else:
+            msg = f"Successfully indexed {target} ({success_count} item{'s' if success_count != 1 else ''} ingested)."
+            _status("✅", msg)
+            return msg

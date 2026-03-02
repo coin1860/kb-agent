@@ -24,6 +24,7 @@ from kb_agent.config import load_settings
 SLASH_COMMANDS = [
     ("/clear", "Clear chat history"),
     ("/help", "Show available commands"),
+    ("/index", "Index a URL, Jira ticket, or Confluence page"),
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
     ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
@@ -855,8 +856,10 @@ class KBAgentApp(App):
             event.stop()
 
     def _exec_slash(self, cmd_text: str):
-        cmd = cmd_text.lower().split()[0]
+        parts = cmd_text.strip().split(maxsplit=1)
+        cmd = parts[0].lower()
         log = self.query_one("#chat-log", RichLog)
+        
         if cmd == "/help":
             log.write(HELP_TEXT)
         elif cmd == "/settings":
@@ -865,12 +868,43 @@ class KBAgentApp(App):
             self.action_clear_chat()
         elif cmd == "/web_engine":
             self.push_screen(WebEngineScreen())
+        elif cmd == "/index":
+            if len(parts) < 2:
+                log.write("[yellow]Usage: /index <url | jira_id | confluence_id>[/yellow]")
+            else:
+                self._run_index_command(parts[1])
         elif cmd == "/quit":
             self.exit()
         else:
             log.write(f"[red]Unknown command: {cmd}[/red]  [dim]Type /help[/dim]")
 
     # ─── Query Worker ─────────────────────────────────────────────────────
+
+    @work(thread=True, exclusive=True)
+    def _run_index_command(self, target: str):
+        """Asynchronously trigger the engine's index_resource command."""
+        log = self.query_one("#chat-log", RichLog)
+
+        def on_status(emoji, msg):
+            self.call_from_thread(log.write, f"  [dim]{emoji} {msg}[/dim]")
+
+        self.call_from_thread(self._refresh_status, "thinking", "Indexing...")
+        self.call_from_thread(log.write, "")
+        self.call_from_thread(log.write, f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]")
+        
+        try:
+            # engine.index_resource will handle routing to Web/Jira/Confluence 
+            # and writing progress iteratively using on_status
+            result = self.engine.index_resource(target, on_status=on_status)
+            
+            # Write final output (which might be success or failure string from engine)
+            self.call_from_thread(log.write, "")
+            self.call_from_thread(log.write, Padding(result, (0, 0, 0, 2)))
+        except Exception as e:
+            self.call_from_thread(log.write, f"\n[red]✗ Error indexing {target}: {e}[/red]")
+        finally:
+            self.call_from_thread(log.write, "[dim]────────────────────────────────────────[/dim]")
+            self.call_from_thread(self._refresh_status, "idle")
 
     @work(thread=True, exclusive=True)
     def _run_query(self, query: str):
