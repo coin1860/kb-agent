@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import concurrent.futures
 from rich.markdown import Markdown
 from rich.padding import Padding
 
@@ -28,6 +29,7 @@ SLASH_COMMANDS = [
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
     ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
+    ("/file_search", "Search files in the knowledge base"),
 ]
 
 
@@ -524,11 +526,12 @@ WELCOME = """\
 
 HELP_TEXT = """\
 [bold cyan]Commands:[/bold cyan]
-  [bold yellow]/help[/bold yellow]         Show this message
-  [bold yellow]/settings[/bold yellow]     Configure API key, model & max iterations
-  [bold yellow]/web_engine[/bold yellow]   Switch web engine (markdownify / crawl4ai)
-  [bold yellow]/clear[/bold yellow]        Clear chat
-  [bold yellow]/quit[/bold yellow]         Exit
+  [bold yellow]/help[/bold yellow]          Show this message
+  [bold yellow]/settings[/bold yellow]      Configure API key, model & max iterations
+  [bold yellow]/web_engine[/bold yellow]    Switch web engine (markdownify / crawl4ai)
+  [bold yellow]/file_search[/bold yellow]   Search files in the knowledge base
+  [bold yellow]/clear[/bold yellow]         Clear chat
+  [bold yellow]/quit[/bold yellow]          Exit
 
 [bold cyan]Shortcuts:[/bold cyan]
   [bold]Ctrl+Q[/bold] Quit   [bold]Ctrl+L[/bold] Clear   [bold]Ctrl+S[/bold] Settings
@@ -581,6 +584,7 @@ class KBAgentApp(App):
     BINDINGS = [
         Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
         Binding("ctrl+l", "clear_chat", "Clear", show=False),
+        Binding("C", "clear_chat", "Clear", show=False),
         Binding("ctrl+s", "open_settings", "Settings", show=False),
         Binding("ctrl+a", "select_all_input", "Select All", show=False, priority=True),
     ]
@@ -633,17 +637,19 @@ class KBAgentApp(App):
         margin-top: 0;
     }
     #btn-copy {
-        height: 1;
-        min-width: 8;
-        padding: 0 1;
-        margin: 0 2;
-        background: $accent;
-        color: $text;
-        border: none;
+        dock: right;
+        margin: 1 2;
         display: none;
+        layer: overlay;
+        background: transparent;
+        color: $text-muted;
+        min-width: 8;
+        height: 1;
+        border: none;
     }
-    #btn-copy.visible {
-        display: block;
+    #btn-copy:hover {
+        background: $boost;
+        color: $text;
     }
     #source-links-container {
         height: auto;
@@ -690,6 +696,7 @@ class KBAgentApp(App):
         # Chat messages area
         with Container(id="chat-area"):
             yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
+            yield Button("📋 Copy", id="btn-copy")
 
         # Bottom panel: palette + editor + status
         with Vertical(id="bottom-panel"):
@@ -698,7 +705,6 @@ class KBAgentApp(App):
                 yield ChatInput(id="chat-input", language=None, show_line_numbers=False)
             yield Horizontal(
                 StatusBar(id="status-bar"),
-                Button("Copy", id="btn-copy"),
                 id="info-row",
             )
 
@@ -706,13 +712,9 @@ class KBAgentApp(App):
         try:
             btn = self.query_one("#btn-copy")
             if value:
-                btn.add_class("visible")
-                if "```" in value:
-                    btn.label = "Copy Code"
-                else:
-                    btn.label = "Copy"
+                btn.display = True
             else:
-                btn.remove_class("visible")
+                btn.display = False
         except:
             pass
 
@@ -894,6 +896,11 @@ class KBAgentApp(App):
             self.action_clear_chat()
         elif cmd == "/web_engine":
             self.push_screen(WebEngineScreen())
+        elif cmd == "/file_search":
+            if len(parts) < 2:
+                log.write("[yellow]Usage: /file_search <query>[/yellow]")
+            else:
+                self._run_file_search(parts[1])
         elif cmd == "/index":
             if len(parts) < 2:
                 log.write("[yellow]Usage: /index <url | jira_id | confluence_id>[/yellow]")
@@ -931,6 +938,154 @@ class KBAgentApp(App):
         finally:
             self.call_from_thread(log.write, "[dim]────────────────────────────────────────[/dim]")
             self.call_from_thread(self._refresh_status, "idle")
+
+    @work(thread=True, exclusive=True)
+    def _run_file_search(self, query: str):
+        """Search files via parallel ChromaDB queries with hardcoded sub-query decomposition."""
+        log = self.query_one("#chat-log", RichLog)
+
+        self.call_from_thread(self._refresh_status, "thinking", "Searching files...")
+        self.call_from_thread(log.write, "")
+        self.call_from_thread(
+            log.write,
+            f"  [dim]{self._ts()}[/dim]  [bold green]You[/bold green]",
+        )
+        self.call_from_thread(log.write, Padding(f"/file_search {query}", (0, 0, 0, 2)))
+        self.call_from_thread(log.write, "")
+        self.call_from_thread(
+            log.write,
+            f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]",
+        )
+
+        try:
+            from kb_agent.tools.vector_tool import VectorTool
+
+            # 1. Hardcoded sub-query decomposition
+            sub_queries = [
+                query,
+                f"关于 {query} 的相关内容",
+                f"{query} 文档 资料 说明",
+            ]
+            self.call_from_thread(log.write, f"  [dim]🔀 Decomposed into {len(sub_queries)} sub-queries[/dim]")
+
+            # 2. Parallel ChromaDB search
+            vt = VectorTool()
+
+            def _search(q: str):
+                return vt.search(q, n_results=10)
+
+            all_chunks = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {pool.submit(_search, sq): sq for sq in sub_queries}
+                for fut in concurrent.futures.as_completed(futures):
+                    sq = futures[fut]
+                    try:
+                        results = fut.result()
+                        all_chunks.extend(results)
+                        self.call_from_thread(
+                            log.write,
+                            f"  [dim]🔍 Sub-query '{sq[:40]}' → {len(results)} chunks[/dim]",
+                        )
+                    except Exception as e:
+                        self.call_from_thread(
+                            log.write,
+                            f"  [dim]❌ Sub-query '{sq[:40]}' failed: {e}[/dim]",
+                        )
+
+            # 3. Distinct chunks by id
+            seen_ids = set()
+            unique_chunks = []
+            for c in all_chunks:
+                cid = c.get("id", "")
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    unique_chunks.append(c)
+
+            self.call_from_thread(
+                log.write,
+                f"  [dim]🧹 Deduplicated: {len(all_chunks)} → {len(unique_chunks)} chunks[/dim]",
+            )
+
+            # 4. Sort by score ascending (L2 distance, lower = more relevant)
+            unique_chunks.sort(key=lambda x: x.get("score", float("inf")))
+
+            # 5. Extract unique files, top 5
+            seen_files = set()
+            top_files = []
+            for c in unique_chunks:
+                meta = c.get("metadata", {})
+                # Use metadata.get("path") if available (which points to source file like file.pdf)
+                original_path = meta.get("path")
+                if not original_path:
+                    raw_path = meta.get("file_path") or meta.get("related_file") or ""
+                    if not raw_path:
+                        continue
+                    # Normalize: source/X.pdf → index/X.md just to have something safe
+                    original_path = self._normalize_file_path(raw_path)
+                
+                # Fetch original filename and derive archive link
+                import urllib.parse
+                fname = os.path.basename(original_path)
+                stem = os.path.splitext(fname)[0]
+                
+                # The cli.py archives files using only their stem (no extension)
+                archive_file_path = str(config.settings.archive_path.absolute() / stem)
+                
+                # Use standard 'file://' prefix with URL encoding to pass to terminal
+                encoded_path = urllib.parse.quote(archive_file_path)
+                archive_link = f"file://{encoded_path}"
+
+                if fname in seen_files:
+                    continue
+                seen_files.add(fname)
+
+                score = c.get("score", float("inf"))
+                desc = c.get("content", "")[:80].replace("|", " ").replace("\n", " ").strip()
+                top_files.append((fname, archive_link, score, desc))
+                if len(top_files) >= 5:
+                    break
+
+            # 6. Render as a rich.table.Table to support terminal hyperlinks
+            if top_files:
+                from rich.table import Table
+                table = Table(show_header=True, expand=True)
+                table.add_column("Index", justify="right", style="cyan", no_wrap=True)
+                table.add_column("Filename", style="green", no_wrap=True)
+                table.add_column("Score", style="magenta", no_wrap=True)
+                table.add_column("Desc", style="white")
+
+                for i, (fname, link, score, desc) in enumerate(top_files, 1):
+                    formatted_score = f"{score:.3f}" if score != float("inf") else "N/A"
+                    # Use rich markup for the hyperlink
+                    table.add_row(str(i), f"[link={link}]{fname}[/link]", formatted_score, desc)
+                
+                self.call_from_thread(log.write, Padding(table, (0, 0, 0, 2)))
+            else:
+                self.call_from_thread(
+                    log.write,
+                    "  [yellow]No matching files found in the knowledge base.[/yellow]",
+                )
+
+        except Exception as e:
+            self.call_from_thread(log.write, f"\n[red]✗ File search error: {e}[/red]")
+        finally:
+            self.call_from_thread(
+                log.write, "[dim]────────────────────────────────────────[/dim]"
+            )
+            self.call_from_thread(self._refresh_status, "idle")
+
+    @staticmethod
+    def _normalize_file_path(path: str) -> str:
+        """Normalize source/X.pdf → index/X.md"""
+        if not path:
+            return path
+        # Replace source/ directory prefix with index/
+        path = re.sub(r'(^|[/\\])source([/\\])', r'\1index\2', path)
+        # Replace known binary extensions with .md
+        base, ext = os.path.splitext(path)
+        if ext.lower() in ('.pdf', '.docx', '.xlsx', '.csv', '.txt'):
+            path = base + '.md'
+        return path
 
     @work(thread=True, exclusive=True)
     def _run_query(self, query: str):
@@ -1005,8 +1160,11 @@ class KBAgentApp(App):
         log = self.query_one("#chat-log", RichLog)
         log.clear()
         self.chat_history = []
-        log.write("[dim]Chat history cleared.[/dim]")
-        self.chat_history = []
+        self.last_response = ""
+        try:
+            self.query_one("#btn-copy").display = False
+        except:
+            pass
         log.write("[dim]Chat history cleared.[/dim]")
 
     def action_open_settings(self):
@@ -1016,22 +1174,51 @@ class KBAgentApp(App):
         if not self.last_response:
             return
         
-        # Try to find code blocks
-        code_blocks = re.findall(r'```(?:\w+)?\n(.*?)\n```', self.last_response, re.DOTALL)
-        if code_blocks:
-            # Join all code blocks
-            text_to_copy = "\n\n".join(code_blocks)
-            msg = "Code copied to clipboard!"
-        else:
-            text_to_copy = self.last_response
-            msg = "Response copied to clipboard!"
+        md_text = self.last_response
         
         try:
-            # Simple pbcopy for Mac
-            subprocess.run(['pbcopy'], input=text_to_copy.encode('utf-8'), check=True)
-            self.notify(msg)
+            from markdown_it import MarkdownIt
+            md_parser = MarkdownIt("commonmark", {"breaks": False, "html": True})
+            html_body = md_parser.render(md_text)
+            
+            # Wrappers to make it look good in emails
+            html_wrapper = f"""
+            <html>
+            <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; }}
+                h1, h2, h3, h4, h5, h6 {{ font-size: 14px; font-weight: bold; margin: 0.5em 0 0.3em 0; }}
+                p {{ margin: 0 0 0.5em 0; }}
+                ul, ol {{ margin: 0 0 0.5em 0; padding-left: 20px; }}
+                li {{ margin: 0; }}
+                code {{ font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; background-color: #f6f8fa; padding: 0.2em 0.4em; border-radius: 6px; font-size: 85%; }}
+                pre {{ background-color: #f6f8fa; padding: 16px; border-radius: 6px; overflow: auto; }}
+                pre code {{ background-color: transparent; padding: 0; }}
+            </style>
+            </head>
+            <body>
+            {html_body}
+            </body>
+            </html>
+            """
+            
+            # Run through textutil to convert HTML to RTF and pipe to pbcopy
+            p1 = subprocess.Popen(["textutil", "-stdin", "-format", "html", "-convert", "rtf", "-stdout"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            p2 = subprocess.Popen(["pbcopy"], stdin=p1.stdout)
+            
+            stdout, stderr = p1.communicate(input=html_wrapper.encode("utf-8"))
+            p1.stdout.close()
+            p2.communicate()
+
+            self.notify("Response copied as Rich Text (RTF) to clipboard!")
         except Exception as e:
-            self.notify(f"Copy failed: {e}", severity="error")
+            # Fallback to plain markdown text
+            try:
+                subprocess.run(['pbcopy'], input=md_text.encode('utf-8'), check=True)
+                self.notify("Response copied as Plain Text to clipboard!")
+            except Exception as inner_e:
+                self.notify(f"Copy failed: {e}", severity="error")
 
     def action_select_all_input(self):
         """Select all text in the TextArea input."""
