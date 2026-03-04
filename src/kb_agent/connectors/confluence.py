@@ -6,9 +6,9 @@ Authentication: Basic auth using email + API token (Atlassian Cloud)
 """
 
 import logging
-import requests
 from typing import List, Dict, Any, Optional
 from markdownify import markdownify as md
+from atlassian import Confluence
 
 from .base import BaseConnector
 import kb_agent.config as config
@@ -17,7 +17,7 @@ logger = logging.getLogger("kb_agent_audit")
 
 
 class ConfluenceConnector(BaseConnector):
-    """Fetches Confluence pages using the Confluence REST API."""
+    """Fetches Confluence pages using the atlassian-python-api Confluence client."""
 
     def __init__(self, base_url: str = None, token: str = None):
         settings = config.settings
@@ -30,17 +30,18 @@ class ConfluenceConnector(BaseConnector):
                 self.base_url = str(settings.confluence_url).rstrip("/")
             if not self.token and settings.confluence_token:
                 self.token = settings.confluence_token.get_secret_value()
+                
+        self.confluence = None
+        if self._is_configured:
+            self.confluence = Confluence(
+                url=self.base_url,
+                token=self.token,
+                verify_ssl=False
+            )
 
     @property
     def _is_configured(self) -> bool:
         return bool(self.base_url and self.token)
-
-    def _headers(self):
-        return {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.token}",
-        }
 
     # ------------------------------------------------------------------
     # fetch_data — by page ID or CQL search
@@ -67,24 +68,20 @@ class ConfluenceConnector(BaseConnector):
 
     def _fetch_page(self, page_id: str) -> List[Dict[str, Any]]:
         """Fetch a single Confluence page by its numeric ID."""
-        url = f"{self.base_url}/wiki/rest/api/content/{page_id}"
-        params = {
-            "expand": "body.storage,space,version,ancestors",
-        }
-
         try:
-            resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=15, verify=False)
-            if resp.status_code == 404:
-                return [{"id": page_id, "title": f"Page {page_id} not found",
-                         "content": f"Confluence page ID {page_id} does not exist.",
-                         "metadata": {"source": "confluence", "error": True}}]
+            page_data = self.confluence.get_page_by_id(
+                page_id,
+                expand="body.storage,space,version,ancestors"
+            )
+            
+            if not page_data:
+                 return [{"id": page_id, "title": f"Page {page_id} not found",
+                          "content": f"Confluence page ID {page_id} does not exist or access is denied.",
+                          "metadata": {"source": "confluence", "error": True}}]
+                          
+            return [self._format_page(page_data)]
 
-            resp.raise_for_status()
-            data = resp.json()
-            return [self._format_page(data)]
-
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Confluence API error for page {page_id}: {e}")
             return [{"id": page_id, "title": "Confluence API error",
                      "content": f"Failed to fetch page {page_id}: {e}",
@@ -92,22 +89,21 @@ class ConfluenceConnector(BaseConnector):
 
     def _search_cql(self, text: str) -> List[Dict[str, Any]]:
         """Search Confluence using CQL text search."""
-        url = f"{self.base_url}/wiki/rest/api/content/search"
-        params = {
-            "cql": f'text ~ "{text}" ORDER BY lastmodified DESC',
-            "limit": 5,
-            "expand": "body.storage,space,version",
-        }
-
         try:
-            resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=15, verify=False)
-            resp.raise_for_status()
-            data = resp.json()
+            cql = f'text ~ "{text}" ORDER BY lastmodified DESC'
+            # Note: atlassian-python-api does not have a direct direct cql method in its main class, 
+            # we can use get method or cql search if available.
+            # Alternatively, we can use the rest api explicitly. But wait, atlassian-python-api Confluence
+            # has `cql` method as of recent versions.
+            
+            data = getattr(self.confluence, "cql", lambda cql, **kwargs: 
+                self.confluence.get("rest/api/content/search", params={"cql": cql, **kwargs})
+            )(cql, limit=5, expand="body.storage,space,version")
 
             results = []
             for page in data.get("results", []):
                 results.append(self._format_page(page))
+                
             return results if results else [{
                 "id": "search",
                 "title": f"No Confluence results for: {text}",
@@ -115,11 +111,56 @@ class ConfluenceConnector(BaseConnector):
                 "metadata": {"source": "confluence"},
             }]
 
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Confluence search error: {e}")
             return [{"id": "search_error", "title": "Confluence search error",
                      "content": f"Failed to search Confluence: {e}",
                      "metadata": {"source": "confluence", "error": True}}]
+
+    # ------------------------------------------------------------------
+    # crawl_tree - BFS traversal
+    # ------------------------------------------------------------------
+
+    def crawl_tree(self, root_page_id: str, max_depth: int = 3, on_progress=None) -> List[Dict[str, Any]]:
+        """BFS crawl of a Confluence page tree."""
+        if not self._is_configured:
+            raise ValueError("Confluence connector is not configured.")
+            
+        pages = []
+        queue = [(root_page_id, 0)]  # (page_id, current_depth)
+        visited = set()
+        total_found = 0
+        
+        while queue:
+            page_id, depth = queue.pop(0)
+            if page_id in visited or depth > max_depth:
+                continue
+            visited.add(page_id)
+            
+            try:
+                # Fetch page content
+                page_data = self.confluence.get_page_by_id(
+                    page_id,
+                    expand="body.storage,space,version,ancestors"
+                )
+                formatted_page = self._format_page(page_data)
+                pages.append(formatted_page)
+                total_found += 1
+                
+                if on_progress:
+                    on_progress(total_found, formatted_page.get("title", "Unknown"))
+                    
+                # Get children if not at max depth
+                if depth < max_depth:
+                    children = self.confluence.get_child_pages(page_id)
+                    for child in children:
+                        if child['id'] not in visited:
+                            queue.append((child['id'], depth + 1))
+                            
+            except Exception as e:
+                logger.error(f"Failed to crawl Confluence page {page_id}: {e}")
+                
+        return pages
 
     # ------------------------------------------------------------------
     # Helpers
@@ -138,6 +179,13 @@ class ConfluenceConnector(BaseConnector):
         title = data.get("title", "Untitled")
         page_id = data.get("id", "")
 
+        # Build page URL
+        page_url = ""
+        if self.base_url:
+            web_link = data.get("_links", {}).get("webui", "")
+            if web_link:
+                page_url = f"{self.base_url}/wiki{web_link}"
+
         # Build rich content
         content_parts = [
             f"# {title}",
@@ -145,19 +193,13 @@ class ConfluenceConnector(BaseConnector):
             f"**Space:** {space.get('name', space.get('key', 'Unknown'))}",
             f"**Version:** {version.get('number', 'Unknown')}",
             f"**Last Modified:** {version.get('when', 'Unknown')} by {version.get('by', {}).get('displayName', 'Unknown')}",
+            f"**URL:** {page_url}",
         ]
         if ancestor_titles:
             content_parts.append(f"**Path:** {' > '.join(ancestor_titles)} > {title}")
         content_parts.append("")
         content_parts.append("## Content")
         content_parts.append(content_md)
-
-        # Build page URL
-        page_url = ""
-        if self.base_url:
-            web_link = data.get("_links", {}).get("webui", "")
-            if web_link:
-                page_url = f"{self.base_url}/wiki{web_link}"
 
         return {
             "id": page_id,

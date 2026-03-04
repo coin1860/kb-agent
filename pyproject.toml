@@ -31,6 +31,7 @@ dependencies = [
     "crawl4ai>=0.6.0",
     "rank-bm25>=0.2.0",
     "pymupdf>=1.27.1",
+    "atlassian-python-api>=3.41.0",
 ]
 
 [project.scripts]

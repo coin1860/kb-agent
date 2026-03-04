@@ -6,9 +6,9 @@ Authentication: Basic auth using email + API token (Atlassian Cloud)
 """
 
 import logging
-import requests
 from typing import List, Dict, Any, Optional
 from markdownify import markdownify as md
+from atlassian import Jira
 
 from .base import BaseConnector
 import kb_agent.config as config
@@ -17,7 +17,7 @@ logger = logging.getLogger("kb_agent_audit")
 
 
 class JiraConnector(BaseConnector):
-    """Fetches Jira issues using the Jira REST API v2."""
+    """Fetches Jira issues using the atlassian-python-api Jira client."""
 
     def __init__(self, base_url: str = None, token: str = None):
         settings = config.settings
@@ -30,20 +30,21 @@ class JiraConnector(BaseConnector):
                 self.base_url = str(settings.jira_url).rstrip("/")
             if not self.token and settings.jira_token:
                 self.token = settings.jira_token.get_secret_value()
+                
+        self.jira = None
+        if self._is_configured:
+            self.jira = Jira(
+                url=self.base_url,
+                token=self.token,
+                verify_ssl=False
+            )
 
     @property
     def _is_configured(self) -> bool:
         return bool(self.base_url and self.token)
 
-    def _headers(self):
-        return {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.token}",
-        }
-
     # ------------------------------------------------------------------
-    # fetch_data — single issue by key, or JQL search
+    # fetch_data — single issue by key, or text search
     # ------------------------------------------------------------------
 
     def fetch_data(self, query: str) -> List[Dict[str, Any]]:
@@ -64,64 +65,91 @@ class JiraConnector(BaseConnector):
         if re.match(r'^[A-Z][A-Z0-9]+-\d+$', query.strip()):
             return self._fetch_issue(query.strip())
         else:
-            return self._search_jql(query)
+            return self._search_jql(f'text ~ "{query}" ORDER BY updated DESC')
 
     def _fetch_issue(self, issue_key: str) -> List[Dict[str, Any]]:
         """Fetch a single Jira issue by key."""
-        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
-        params = {"expand": "renderedFields"}
-
         try:
-            resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=15, verify=False)
-            if resp.status_code == 404:
+            issue_data = self.jira.issue(issue_key, expand="renderedFields")
+            if not issue_data:
                 return [{"id": issue_key, "title": f"Issue {issue_key} not found",
-                         "content": f"Jira issue {issue_key} does not exist.",
+                         "content": f"Jira issue {issue_key} does not exist or access is denied.",
                          "metadata": {"source": "jira", "error": True}}]
+                         
+            return [self._format_issue(issue_data)]
 
-            resp.raise_for_status()
-            data = resp.json()
-            return [self._format_issue(data)]
-
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Jira API error for {issue_key}: {e}")
             return [{"id": issue_key, "title": f"Jira API error",
                      "content": f"Failed to fetch {issue_key}: {e}",
                      "metadata": {"source": "jira", "error": True}}]
 
-    def _search_jql(self, text: str) -> List[Dict[str, Any]]:
-        """Search Jira using JQL text search."""
-        url = f"{self.base_url}/rest/api/2/search"
-        jql = f'text ~ "{text}" ORDER BY updated DESC'
-        params = {
-            "jql": jql,
-            "maxResults": 5,
-            "fields": "summary,description,status,priority,assignee,reporter,"
-                      "issuetype,created,updated,labels,components",
-            "expand": "renderedFields",
-        }
-
+    def _search_jql(self, jql: str) -> List[Dict[str, Any]]:
+        """Search Jira using arbitrary JQL query."""
         try:
-            resp = requests.get(url, headers=self._headers(),
-                                params=params, timeout=15, verify=False)
-            resp.raise_for_status()
-            data = resp.json()
-
+            data = self.jira.jql(jql, limit=20, expand="renderedFields")
+            
             results = []
             for issue in data.get("issues", []):
                 results.append(self._format_issue(issue))
+                
             return results if results else [{
                 "id": "search",
-                "title": f"No Jira results for: {text}",
+                "title": f"No Jira results",
                 "content": f"JQL search '{jql}' returned 0 results.",
                 "metadata": {"source": "jira"},
             }]
 
-        except requests.RequestException as e:
+        except Exception as e:
             logger.error(f"Jira search error: {e}")
             return [{"id": "search_error", "title": "Jira search error",
-                     "content": f"Failed to search Jira: {e}",
+                     "content": f"Failed to execute JQL '{jql}': {e}",
                      "metadata": {"source": "jira", "error": True}}]
+
+    def jql_search(self, natural_query: str) -> List[Dict[str, Any]]:
+        """Use LLM to convert a natural language query to JQL, then execute it."""
+        from kb_agent.llm import LLMClient
+        import re
+        
+        if not self._is_configured:
+            return [{"id": natural_query, "title": "Jira not configured",
+                     "content": "Jira URL or API token is not set.",
+                     "metadata": {"source": "jira", "error": True}}]
+                     
+        jql_prompt = f"""Convert the following natural language query to Jira JQL.
+Output ONLY the JQL string, nothing else. Do not use formatting like markdown code blocks.
+
+Available JQL functions: currentUser(), now(), startOfDay(), endOfDay(), 
+startOfWeek(), endOfWeek(), startOfMonth(), endOfMonth()
+
+Examples:
+- "my unresolved tasks" → assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC
+- "high priority bugs" → priority in (High, Highest) AND type = Bug ORDER BY created DESC
+- "tasks updated this week" → updated >= startOfWeek() ORDER BY updated DESC
+
+Query: {natural_query}
+JQL:"""
+        
+        try:
+            llm = LLMClient()
+            jql = llm.chat_completion([
+                {"role": "system", "content": "You are a JQL expert. Output ONLY valid JQL."},
+                {"role": "user", "content": jql_prompt}
+            ]).strip()
+            
+            # Remove any markdown code blocks if the LLM adds them despite instructions
+            jql = re.sub(r'^```jql\s*', '', jql, flags=re.IGNORECASE)
+            jql = re.sub(r'^```\s*', '', jql)
+            jql = re.sub(r'\s*```$', '', jql)
+            
+            logger.info(f"Generated JQL: {jql} from query: {natural_query}")
+            return self._search_jql(jql)
+            
+        except Exception as e:
+             logger.error(f"JQL Generation or Execution Error: {e}")
+             return [{"id": "search_error", "title": "Jira JQL error",
+                      "content": f"Failed to generate or execute JQL: {e}",
+                      "metadata": {"source": "jira", "error": True}}]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -136,6 +164,10 @@ class JiraConnector(BaseConnector):
         description = rendered.get("description") or fields.get("description") or ""
         if "<" in description:  # looks like HTML
             description = md(description, strip=["img"])
+            
+        issue_key = data.get("key", "")
+        summary = fields.get("summary", "")
+        issue_url = f"{self.base_url}/browse/{issue_key}"
 
         assignee = fields.get("assignee")
         reporter = fields.get("reporter")
@@ -147,27 +179,61 @@ class JiraConnector(BaseConnector):
 
         # Build a rich content string
         content_parts = [
-            f"# {data.get('key', '')} — {fields.get('summary', '')}",
+            f"# {issue_key} — {summary}",
             "",
-            f"**Type:** {issuetype.get('name', 'Unknown')}",
-            f"**Status:** {status.get('name', 'Unknown')}",
-            f"**Priority:** {priority.get('name', 'Unknown')}",
-            f"**Assignee:** {assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'}",
-            f"**Reporter:** {reporter.get('displayName', 'Unknown') if reporter else 'Unknown'}",
+            f"**Type:** {issuetype.get('name', 'Unknown')} | **Status:** {status.get('name', 'Unknown')} | **Priority:** {priority.get('name', 'Unknown')}",
+            f"**Assignee:** {assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'} | **Reporter:** {reporter.get('displayName', 'Unknown') if reporter else 'Unknown'}",
         ]
         if labels:
             content_parts.append(f"**Labels:** {', '.join(labels)}")
         if components:
             content_parts.append(f"**Components:** {', '.join(components)}")
-        content_parts.append(f"**Created:** {fields.get('created', '')}")
-        content_parts.append(f"**Updated:** {fields.get('updated', '')}")
+        content_parts.append(f"**Created:** {fields.get('created', '')} | **Updated:** {fields.get('updated', '')}")
+        content_parts.append(f"**URL:** {issue_url}")
         content_parts.append("")
         content_parts.append("## Description")
         content_parts.append(description or "(No description)")
+        
+        # --- Sub-tasks ---
+        subtasks = fields.get("subtasks", [])
+        if subtasks:
+            content_parts.append("\n## Sub-Tasks")
+            content_parts.append("| Key | Summary | Status | Assignee |")
+            content_parts.append("|-----|---------|--------|----------|")
+            for st in subtasks:
+                st_key = st.get("key", "")
+                st_summary = st.get("fields", {}).get("summary", "")
+                st_status = st.get("fields", {}).get("status", {}).get("name", "")
+                st_assignee = st.get("fields", {}).get("assignee", {})
+                st_assignee_name = st_assignee.get("displayName", "Unassigned") if st_assignee else "Unassigned"
+                link = f"[{st_key}]({self.base_url}/browse/{st_key})"
+                content_parts.append(f"| {link} | {st_summary} | {st_status} | {st_assignee_name} |")
+
+        # --- Issue Links ---
+        issuelinks = fields.get("issuelinks", [])
+        if issuelinks:
+            content_parts.append("\n## Related Issues")
+            content_parts.append("| Relationship | Key | Summary | Status |")
+            content_parts.append("|-------------|-----|---------|--------|")
+            for link in issuelinks:
+                link_type = link.get("type", {})
+                if "outwardIssue" in link:
+                    relation = link_type.get("outward", "relates to")
+                    linked = link["outwardIssue"]
+                elif "inwardIssue" in link:
+                    relation = link_type.get("inward", "relates to")
+                    linked = link["inwardIssue"]
+                else:
+                    continue
+                lk = linked.get("key", "")
+                ls = linked.get("fields", {}).get("summary", "")
+                lst = linked.get("fields", {}).get("status", {}).get("name", "")
+                md_link = f"[{lk}]({self.base_url}/browse/{lk})"
+                content_parts.append(f"| {relation} | {md_link} | {ls} | {lst} |")
 
         return {
-            "id": data.get("key", ""),
-            "title": fields.get("summary", ""),
+            "id": issue_key,
+            "title": summary,
             "content": "\n".join(content_parts),
             "metadata": {
                 "source": "jira",
@@ -176,7 +242,7 @@ class JiraConnector(BaseConnector):
                 "assignee": assignee.get("displayName", "") if assignee else "",
                 "type": issuetype.get("name", ""),
                 "labels": labels,
-                "url": f"{self.base_url}/browse/{data.get('key', '')}",
+                "url": issue_url,
             },
         }
 

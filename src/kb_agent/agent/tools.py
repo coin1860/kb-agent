@@ -210,6 +210,25 @@ def jira_fetch(issue_key: str) -> str:
 
 
 @tool
+def jira_jql(query: str) -> str:
+    """Search Jira issues using natural language. The query will be
+    converted to JQL automatically.
+
+    Use this when the user wants to search Jira based on criteria like
+    "my unresolved tasks", "high priority bugs in project X",
+    "issues assigned to me updated this week", etc.
+
+    Args:
+        query: Natural language description of the Jira search criteria.
+
+    Returns:
+        JSON array of matching Jira issues with details.
+    """
+    results = _get_jira().jql_search(query)
+    return json.dumps(results, ensure_ascii=False)
+
+
+@tool
 def confluence_fetch(page_id: str) -> str:
     """Fetch a Confluence page by its ID or search for pages by text.
 
@@ -271,6 +290,7 @@ ALL_TOOLS = [
     read_file,
     # graph_related,
     jira_fetch,
+    jira_jql,
     confluence_fetch,
     web_fetch
 ]
