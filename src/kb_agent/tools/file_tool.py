@@ -62,6 +62,12 @@ class FileTool:
                     path = fallback
                 else:
                     return f"[ERROR: NOT_FOUND] File '{file_path}' does not exist."
+            else:
+                # Even if the source file exists, prefer the indexed .md version
+                # which contains the fully processed content
+                index_version = self._resolve_source_to_index(file_path)
+                if index_version and index_version.exists():
+                    path = index_version
 
             if not path.is_file():
                 return f"[ERROR: NOT_A_FILE] Path '{file_path}' is a directory, not a file."

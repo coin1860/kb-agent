@@ -28,7 +28,8 @@ for mod in ["chromadb", "chromadb.config", "chromadb.utils",
 
 from kb_agent.tui import (
     KBAgentApp, CommandPalette, StatusBar, ChatInput,
-    SettingsScreen, SLASH_COMMANDS, LOGO, WELCOME, HELP_TEXT,
+    SettingsScreen, SettingsCategoryScreen, SettingsDetailScreen,
+    SLASH_COMMANDS, LOGO, WELCOME, HELP_TEXT,
 )
 from textual.widgets import Input, Header, TextArea, Button, RichLog
 
@@ -310,29 +311,34 @@ class TestStatusBar:
 # ─── Settings Modal ──────────────────────────────────────────────────────────
 
 class TestSettings:
-    async def test_composes(self):
+    async def test_category_screen_composes(self):
         app = make_app()
         async with app.run_test() as pilot:
-            app.push_screen(SettingsScreen(), app._on_settings_result)
+            app.push_screen(SettingsCategoryScreen(), app._on_settings_result)
             await pilot.pause(delay=0.5)
             assert app.screen.query_one("#settings-dialog") is not None
 
-    async def test_all_inputs(self):
+    async def test_category_rows_exist(self):
         app = make_app()
         async with app.run_test() as pilot:
-            app.push_screen(SettingsScreen(), app._on_settings_result)
+            app.push_screen(SettingsCategoryScreen(), app._on_settings_result)
+            await pilot.pause(delay=0.5)
+            assert app.screen.query_one("#cat-llm") is not None
+            assert app.screen.query_one("#cat-rag") is not None
+            assert app.screen.query_one("#cat-atlassian") is not None
+            assert app.screen.query_one("#cat-general") is not None
+
+    async def test_detail_screen_llm(self):
+        app = make_app()
+        async with app.run_test() as pilot:
+            app.push_screen(SettingsDetailScreen("llm"), lambda r: None)
             await pilot.pause(delay=0.5)
             assert app.screen.query_one("#api_key", Input) is not None
             assert app.screen.query_one("#base_url", Input) is not None
             assert app.screen.query_one("#model_name", Input) is not None
 
-    async def test_cancel(self):
-        app = make_app()
-        async with app.run_test() as pilot:
-            app.push_screen(SettingsScreen(), app._on_settings_result)
-            await pilot.pause(delay=0.5)
-            app.screen.query_one("#cancel", Button).press()
-            await pilot.pause()
+    async def test_backward_compat_alias(self):
+        assert SettingsScreen is SettingsCategoryScreen
 
 
 # ─── Chat Mode ──────────────────────────────────────────────────────────────

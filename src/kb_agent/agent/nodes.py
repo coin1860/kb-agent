@@ -196,6 +196,8 @@ def _is_tool_applicable(tool_name: str, query: str) -> bool:
     """Validate if a tool is applicable to the given query."""
     if tool_name == "jira_fetch":
         return bool(re.search(r'[A-Z]+-\d+', query))
+    if tool_name == "jira_jql":
+        return True
     if tool_name == "confluence_fetch":
         return bool(re.search(r'confluence|wiki|page.?\d+', query, re.IGNORECASE))
     if tool_name == "web_fetch":
@@ -219,6 +221,8 @@ def _build_tool_args(tool_name: str, query: str) -> dict[str, str] | None:
         if match:
             return {"issue_key": match.group(1)}
         return None
+    if tool_name == "jira_jql":
+        return {"query": query_str}
     if tool_name == "confluence_fetch":
         match = re.search(r'(\d{5,})', query)
         if match:
@@ -251,7 +255,7 @@ def _extract_tools_from_text(
     valid_tools = [
         # "grep_search", # TEMPORARILY DISABLED
         "vector_search", "read_file",
-        "graph_related", "jira_fetch", "confluence_fetch",
+        "graph_related", "jira_fetch", "jira_jql", "confluence_fetch",
         "web_fetch", "local_file_qa"
     ]
 
@@ -298,9 +302,10 @@ TOOL_DESCRIPTIONS = """Available tools:
 1. vector_search(query: str) — Semantic similarity search using ChromaDB embeddings. Best for conceptual/fuzzy queries. Returns JSON array of {id, content, metadata, score}.
 3. read_file(file_path: str, start_line: int=None, end_line: int=None) — Read the full content of a document, or a specific line range. Use after search tools find relevant files.
 4. graph_related(entity_id: str) — Find related entities in the Knowledge Graph (e.g. parent Jira ticket, linked pages). Input is an entity ID like 'PROJ-123' or 'document.md'.
-5. jira_fetch(issue_key: str) — Fetch a Jira issue by key (e.g. 'PROJ-123') or search text. Returns issue details.
-6. confluence_fetch(page_id: str) — Fetch a Confluence page by ID or search text.
-7. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches."""
+5. jira_fetch(issue_key: str) — Fetch a Jira issue by key (e.g. 'PROJ-123'). Returns issue details.
+6. jira_jql(query: str) — Convert natural language to Jira JQL and search. Use for semantic queries like "my unresolved tasks".
+7. confluence_fetch(page_id: str) — Fetch a Confluence page by ID or search text.
+8. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches."""
 
 
 # ---------------------------------------------------------------------------
@@ -335,13 +340,15 @@ DECOMPOSE_SYSTEM = (
     "You are a query analysis expert. Your job is to analyze the user's question and decide how to search the knowledge base.\n\n"
     "RULES:\n"
     "1. If the user asks about a specific Jira ticket (e.g., FSR-123, WCL-456, PROJ-789), output a 'direct' action for jira_fetch.\n"
-    "2. If the user asks about a specific Confluence page ID (e.g., 12345678), output a 'direct' action for confluence_fetch.\n"
-    "3. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
+    "2. If the user asks to SEARCH/QUERY/LIST Jira issues by criteria (e.g. 'my tasks', 'unresolved bugs', '本周更新的任务'), output a 'direct' action for jira_jql.\n"
+    "3. If the user asks about a specific Confluence page ID (e.g., 12345678), output a 'direct' action for confluence_fetch.\n"
+    "4. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
     "   - Sub-queries should capture different aspects, synonyms, or keywords of the original question.\n"
     "   - If the question is very simple, use slightly different phrasing for the 3 sub-queries to maximize recall.\n"
     "   - MUST KEEP THE ORIGINAL LANGUAGE. DO NOT TRANSLATE TO ENGLISH IF THE QUERY IS IN CHINESE.\n"
     "4. Output ONLY valid JSON matching this schema:\n"
     '   - For direct: {"action": "direct", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}}\n'
+    '   - For direct: {"action": "direct", "tool": "jira_jql", "args": {"query": "my unresolved tasks"}}\n'
     '   - For decompose: {"action": "decompose", "sub_queries": ["query 1", "query 2", "query 3"]}\n'
     "5. Do NOT output any other text or explanation."
 )
@@ -570,10 +577,27 @@ def _extract_file_paths_from_context(context: list[str]) -> list[str]:
         # Look for .md file references
         for match in re.finditer(r'[\w/.-]+\.md', item):
             paths.append(match.group(0))
+
+    # Normalize source paths → index paths (source/X.txt → index/X.md)
+    settings = config.settings
+    normalized = []
+    for p in paths:
+        pp = __import__('pathlib').Path(p)
+        if settings and settings.index_path:
+            # Check if this looks like a source file that should be read from index
+            stem = pp.stem
+            ext = pp.suffix.lower()
+            if ext in ('.txt', '.pdf', '.docx', '.xlsx', '.csv') or 'source' in str(pp):
+                index_candidate = settings.index_path / f"{stem}.md"
+                if index_candidate.exists():
+                    normalized.append(str(index_candidate))
+                    continue
+        normalized.append(p)
+
     # De-duplicate while preserving order
     seen = set()
     unique = []
-    for p in paths:
+    for p in normalized:
         if p not in seen:
             seen.add(p)
             unique.append(p)
@@ -698,7 +722,17 @@ def tool_node(state: AgentState) -> dict[str, Any]:
                     line = item.get("line") or item.get("metadata", {}).get("line") or "1"
                     score = item.get("score")
                     content = item.get("content", str(item))
-                    
+
+                    # Normalize source paths → index paths for LLM context
+                    if path and settings and settings.index_path:
+                        from pathlib import Path as _Path
+                        _pp = _Path(path)
+                        _ext = _pp.suffix.lower()
+                        if _ext in ('.txt', '.pdf', '.docx', '.xlsx', '.csv') or 'source' in str(_pp):
+                            _idx = settings.index_path / f"{_pp.stem}.md"
+                            if _idx.exists():
+                                path = str(_idx)
+
                     if path:
                         if score is not None:
                             formatted_items.append(f"[SOURCE:{path}:L{line}:S{score:.4f}] {content}")

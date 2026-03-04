@@ -28,6 +28,7 @@ SLASH_COMMANDS = [
     ("/index", "Index a URL, Jira ticket, or Confluence page"),
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
+    ("/sync_confluence", "Sync Confluence page tree"),
     ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
     ("/file_search", "Search files in the knowledge base"),
 ]
@@ -35,13 +36,128 @@ SLASH_COMMANDS = [
 
 # ─── Settings Modal ─────────────────────────────────────────────────────────
 
-class SettingsScreen(ModalScreen[bool]):
+# ─── Settings Category Definitions ──────────────────────────────────────────
+
+SETTINGS_CATEGORIES = [
+    ("llm", "🤖  LLM", "API Key, Base URL, Model, Embeddings"),
+    ("rag", "🔍  RAG", "Iterations, Score Threshold, Chunking"),
+    ("atlassian", "🔗  Atlassian", "Jira & Confluence URLs and Tokens"),
+    ("general", "⚙️   General", "Data Folder, Debug Mode"),
+]
+
+
+class SettingsCategoryScreen(ModalScreen[bool]):
+    """Level 1: Category selection menu for settings."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close", show=False),
+    ]
+
     CSS = """
-    SettingsScreen { align: center middle; }
+    SettingsCategoryScreen { align: center middle; }
     #settings-dialog {
+        padding: 1 2;
+        width: 50;
+        height: auto;
+        border: thick $primary 60%;
+        background: $surface;
+    }
+    #settings-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    .cat-row {
+        width: 100%;
+        height: 3;
+        padding: 0 2;
+        content-align: left middle;
+    }
+    .cat-row:hover {
+        background: $accent;
+    }
+    .cat-row.highlighted {
+        background: $accent;
+    }
+    """
+
+    highlighted_index: reactive[int] = reactive(0)
+    _saved_any: bool = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-dialog"):
+            yield Label("⚙  Settings", id="settings-title")
+            for i, (key, title, desc) in enumerate(SETTINGS_CATEGORIES):
+                lbl = Label(f"  {title}\n  [dim]{desc}[/dim]", id=f"cat-{key}", classes="cat-row")
+                yield lbl
+
+    def on_mount(self) -> None:
+        self._update_highlight()
+
+    def watch_highlighted_index(self, old_val: int, new_val: int) -> None:
+        self._update_highlight()
+
+    def _update_highlight(self) -> None:
+        rows = self.query(".cat-row")
+        for i, row in enumerate(rows):
+            if i == self.highlighted_index:
+                row.add_class("highlighted")
+            else:
+                row.remove_class("highlighted")
+
+    @on(Key)
+    def handle_keys(self, event: Key) -> None:
+        if event.key == "up":
+            self.highlighted_index = (self.highlighted_index - 1) % len(SETTINGS_CATEGORIES)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down":
+            self.highlighted_index = (self.highlighted_index + 1) % len(SETTINGS_CATEGORIES)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "enter":
+            self._open_detail()
+            event.prevent_default()
+            event.stop()
+
+    def on_click(self, event) -> None:
+        widget = event.widget
+        if widget and hasattr(widget, 'id') and widget.id and widget.id.startswith("cat-"):
+            cat_key = widget.id[4:]
+            for i, (key, _, _) in enumerate(SETTINGS_CATEGORIES):
+                if key == cat_key:
+                    self.highlighted_index = i
+                    self._open_detail()
+                    return
+
+    def _open_detail(self) -> None:
+        cat_key = SETTINGS_CATEGORIES[self.highlighted_index][0]
+        self.app.push_screen(
+            SettingsDetailScreen(cat_key),
+            self._on_detail_result,
+        )
+
+    def _on_detail_result(self, saved: bool) -> None:
+        if saved:
+            self._saved_any = True
+
+    def action_cancel(self) -> None:
+        self.dismiss(self._saved_any)
+
+
+class SettingsDetailScreen(ModalScreen[bool]):
+    """Level 2: Detail form for a single settings category."""
+
+    BINDINGS = [
+        Binding("escape", "go_back", "Back", show=False),
+    ]
+
+    CSS = """
+    SettingsDetailScreen { align: center middle; }
+    #detail-dialog {
         grid-size: 2;
         grid-gutter: 1 2;
-        grid-rows: auto auto auto auto auto auto auto auto auto auto auto auto auto;
+        grid-rows: auto;
         padding: 1 2;
         width: 70;
         height: auto;
@@ -50,7 +166,7 @@ class SettingsScreen(ModalScreen[bool]):
         border: thick $primary 60%;
         background: $surface;
     }
-    #settings-title {
+    #detail-title {
         column-span: 2;
         text-align: center;
         text-style: bold;
@@ -62,174 +178,279 @@ class SettingsScreen(ModalScreen[bool]):
         color: $text-muted;
     }
     .settings-input { width: 100%; }
-    #settings-buttons {
+    #detail-buttons {
         column-span: 2;
         height: 3;
         align: center middle;
     }
-    #settings-buttons Button {
+    #detail-buttons Button {
         margin: 0 1;
         min-width: 16;
     }
     """
 
-    def compose(self) -> ComposeResult:
-        current_url = str(config.settings.llm_base_url) if config.settings and config.settings.llm_base_url else ""
-        current_model = config.settings.llm_model if config.settings and config.settings.llm_model else "gpt-4"
-        current_data_folder = str(config.settings.data_folder) if config.settings and config.settings.data_folder else ""
-        current_api_key = config.settings.llm_api_key.get_secret_value() if config.settings and config.settings.llm_api_key else ""
-        current_embedding_url = config.settings.embedding_url if config.settings and config.settings.embedding_url else ""
-        current_embedding_model = config.settings.embedding_model if config.settings and config.settings.embedding_model else ""
-        current_max_iter = str(config.settings.max_iterations) if config.settings and config.settings.max_iterations is not None else "1"
-        current_threshold = str(config.settings.vector_score_threshold) if config.settings and config.settings.vector_score_threshold is not None else "0.5"
-        current_chunk_max = str(config.settings.chunk_max_chars) if config.settings and config.settings.chunk_max_chars is not None else "800"
-        current_chunk_overlap = str(config.settings.chunk_overlap_chars) if config.settings and config.settings.chunk_overlap_chars is not None else "200"
-        current_debug_mode = str(config.settings.debug_mode) if config.settings and config.settings.debug_mode is not None else "False"
+    def __init__(self, category: str, **kwargs):
+        super().__init__(**kwargs)
+        self.category = category
 
-        with Grid(id="settings-dialog"):
-            yield Label("⚙  Settings", id="settings-title")
-            yield Label("API Key", classes="settings-label", id="lbl-api-key")
-            yield Input(placeholder="sk-...", value=current_api_key, password=False, id="api_key", classes="settings-input")
-            yield Label("Base URL", classes="settings-label", id="lbl-base-url")
-            yield Input(
-                placeholder="https://api.openai.com/v1",
-                value=current_url or "https://api.openai.com/v1",
-                id="base_url", classes="settings-input",
-            )
-            yield Label("Model", classes="settings-label", id="lbl-model")
-            yield Input(placeholder="gpt-4", value=current_model, id="model_name", classes="settings-input")
-            yield Label("Data Folder", classes="settings-label", id="lbl-data-folder")
-            yield Input(
-                placeholder="/path/to/data",
-                value=current_data_folder,
-                id="data_folder", classes="settings-input",
-            )
-            yield Label("Embedding URL", classes="settings-label", id="lbl-embedding-url")
-            yield Input(
-                placeholder="http://localhost:7999/v1",
-                value=current_embedding_url,
-                id="embedding_url", classes="settings-input",
-            )
-            yield Label("Embedding Model", classes="settings-label", id="lbl-embedding-model")
-            yield Input(
-                placeholder="all-MiniLM-L6-v2",
-                value=current_embedding_model,
-                id="embedding_model", classes="settings-input",
-            )
-            yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
-            yield Input(
-                placeholder="1",
-                value=current_max_iter,
-                id="max_iterations", classes="settings-input",
-            )
-            yield Label("Vector Score Threshold", classes="settings-label", id="lbl-vector-threshold")
-            yield Input(
-                placeholder="0.5",
-                value=current_threshold,
-                id="vector_score_threshold", classes="settings-input",
-            )
-            yield Label("Chunk Max Chars", classes="settings-label", id="lbl-chunk-max")
-            yield Input(
-                placeholder="800",
-                value=current_chunk_max,
-                id="chunk_max_chars", classes="settings-input",
-            )
-            yield Label("Chunk Overlap Chars", classes="settings-label", id="lbl-chunk-overlap")
-            yield Input(
-                placeholder="200",
-                value=current_chunk_overlap,
-                id="chunk_overlap_chars", classes="settings-input",
-            )
-            yield Label("Debug Mode", classes="settings-label", id="lbl-debug-mode")
-            yield Input(
-                placeholder="True / False",
-                value=current_debug_mode,
-                id="debug_mode", classes="settings-input",
-            )
-            with Horizontal(id="settings-buttons"):
+    def compose(self) -> ComposeResult:
+        cat_title = next((t for k, t, _ in SETTINGS_CATEGORIES if k == self.category), "Settings")
+
+        with Grid(id="detail-dialog"):
+            yield Label(f"{cat_title}", id="detail-title")
+
+            if self.category == "llm":
+                yield from self._compose_llm()
+            elif self.category == "rag":
+                yield from self._compose_rag()
+            elif self.category == "atlassian":
+                yield from self._compose_atlassian()
+            elif self.category == "general":
+                yield from self._compose_general()
+
+            with Horizontal(id="detail-buttons"):
                 yield Button("Save", id="save")
-                yield Button("Cancel", id="cancel")
+                yield Button("Back", id="cancel")
+
+    # ── Field composers per category ──────────────────────────────────
+
+    def _compose_llm(self):
+        s = config.settings
+        api_key = s.llm_api_key.get_secret_value() if s and s.llm_api_key else ""
+        base_url = str(s.llm_base_url) if s and s.llm_base_url else ""
+        model = s.llm_model if s and s.llm_model else "gpt-4"
+        emb_url = s.embedding_url if s and s.embedding_url else ""
+        emb_model = s.embedding_model if s and s.embedding_model else ""
+
+        yield Label("API Key", classes="settings-label", id="lbl-api-key")
+        yield Input(placeholder="sk-...", value=api_key, password=False, id="api_key", classes="settings-input")
+        yield Label("Base URL", classes="settings-label", id="lbl-base-url")
+        yield Input(placeholder="https://api.openai.com/v1", value=base_url or "https://api.openai.com/v1", id="base_url", classes="settings-input")
+        yield Label("Model", classes="settings-label", id="lbl-model")
+        yield Input(placeholder="gpt-4", value=model, id="model_name", classes="settings-input")
+        yield Label("Embedding URL", classes="settings-label", id="lbl-embedding-url")
+        yield Input(placeholder="http://localhost:7999/v1", value=emb_url, id="embedding_url", classes="settings-input")
+        yield Label("Embedding Model", classes="settings-label", id="lbl-embedding-model")
+        yield Input(placeholder="all-MiniLM-L6-v2", value=emb_model, id="embedding_model", classes="settings-input")
+
+    def _compose_rag(self):
+        s = config.settings
+        max_iter = str(s.max_iterations) if s and s.max_iterations is not None else "1"
+        threshold = str(s.vector_score_threshold) if s and s.vector_score_threshold is not None else "0.5"
+        chunk_max = str(s.chunk_max_chars) if s and s.chunk_max_chars is not None else "800"
+        chunk_overlap = str(s.chunk_overlap_chars) if s and s.chunk_overlap_chars is not None else "200"
+
+        yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
+        yield Input(placeholder="1", value=max_iter, id="max_iterations", classes="settings-input")
+        yield Label("Vector Score Threshold", classes="settings-label", id="lbl-vector-threshold")
+        yield Input(placeholder="0.5", value=threshold, id="vector_score_threshold", classes="settings-input")
+        yield Label("Chunk Max Chars", classes="settings-label", id="lbl-chunk-max")
+        yield Input(placeholder="800", value=chunk_max, id="chunk_max_chars", classes="settings-input")
+        yield Label("Chunk Overlap Chars", classes="settings-label", id="lbl-chunk-overlap")
+        yield Input(placeholder="200", value=chunk_overlap, id="chunk_overlap_chars", classes="settings-input")
+
+    def _compose_atlassian(self):
+        s = config.settings
+        jira_url = str(s.jira_url) if s and s.jira_url else ""
+        jira_token = s.jira_token.get_secret_value() if s and s.jira_token else ""
+        conf_url = str(s.confluence_url) if s and s.confluence_url else ""
+        conf_token = s.confluence_token.get_secret_value() if s and s.confluence_token else ""
+
+        yield Label("Jira URL", classes="settings-label", id="lbl-jira-url")
+        yield Input(placeholder="https://jira.company.com", value=jira_url, id="jira_url", classes="settings-input")
+        yield Label("Jira Token (PAT)", classes="settings-label", id="lbl-jira-token")
+        yield Input(placeholder="...", value=jira_token, password=True, id="jira_token", classes="settings-input")
+        yield Label("Confluence URL", classes="settings-label", id="lbl-confluence-url")
+        yield Input(placeholder="https://confluence.company.com", value=conf_url, id="confluence_url", classes="settings-input")
+        yield Label("Confluence Token (PAT)", classes="settings-label", id="lbl-confluence-token")
+        yield Input(placeholder="...", value=conf_token, password=True, id="confluence_token", classes="settings-input")
+
+    def _compose_general(self):
+        s = config.settings
+        data_folder = str(s.data_folder) if s and s.data_folder else ""
+        debug_mode = str(s.debug_mode) if s and s.debug_mode is not None else "False"
+
+        yield Label("Data Folder", classes="settings-label", id="lbl-data-folder")
+        yield Input(placeholder="/path/to/data", value=data_folder, id="data_folder", classes="settings-input")
+        yield Label("Debug Mode", classes="settings-label", id="lbl-debug-mode")
+        yield Input(placeholder="True / False", value=debug_mode, id="debug_mode", classes="settings-input")
+
+    # ── Save logic ────────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save":
+            self._save()
+        else:
+            self.dismiss(False)
+
+    def action_go_back(self) -> None:
+        self.dismiss(False)
+
+    def _save(self) -> None:
+        """Collect fields from the current category, merge with existing settings, and persist."""
+        updates = {}
+
+        if self.category == "llm":
             api_key = self.query_one("#api_key").value.strip()
             base_url = self.query_one("#base_url").value.strip()
             model = self.query_one("#model_name").value.strip() or "gpt-4"
-            data_folder = self.query_one("#data_folder").value.strip()
-            embedding_url = self.query_one("#embedding_url").value.strip()
-            embedding_model = self.query_one("#embedding_model").value.strip()
-            threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.5"
-            chunk_max_raw = self.query_one("#chunk_max_chars").value.strip() or "800"
-            chunk_overlap_raw = self.query_one("#chunk_overlap_chars").value.strip() or "200"
-            debug_mode_raw = self.query_one("#debug_mode").value.strip().lower()
-
+            emb_url = self.query_one("#embedding_url").value.strip()
+            emb_model = self.query_one("#embedding_model").value.strip()
             if not api_key:
                 self.notify("API Key is required!", severity="error")
                 return
             if not base_url:
                 self.notify("Base URL is required!", severity="error")
                 return
-            
-            # Save LLM settings via config module
-            from pydantic import SecretStr
-            
-            # Max iterations (clamp 1-5)
+            updates = {
+                "llm_api_key": api_key,
+                "llm_base_url": base_url,
+                "llm_model": model,
+                "embedding_url": emb_url or None,
+                "embedding_model": emb_model or None,
+            }
+
+        elif self.category == "rag":
             max_iter_raw = self.query_one("#max_iterations").value.strip() or "1"
+            threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.5"
+            chunk_max_raw = self.query_one("#chunk_max_chars").value.strip() or "800"
+            chunk_overlap_raw = self.query_one("#chunk_overlap_chars").value.strip() or "200"
             try:
                 max_iter = max(1, min(5, int(max_iter_raw)))
             except ValueError:
                 max_iter = 1
-                
             try:
                 threshold = float(threshold_raw)
             except ValueError:
                 threshold = 0.5
-                
             try:
                 chunk_max = int(chunk_max_raw)
             except ValueError:
                 chunk_max = 800
-                
             try:
                 chunk_overlap = int(chunk_overlap_raw)
             except ValueError:
                 chunk_overlap = 200
-
-            debug_mode = debug_mode_raw in ("true", "1", "yes", "t", "y")
-
-            # Maintain the current settings if possible, else create new ones
-            new_settings_data = {}
-            if config.settings:
-                new_settings_data = config.settings.model_dump(mode='json')
-            
-            new_settings_data.update({
-                "llm_api_key": api_key,
-                "llm_base_url": base_url,
-                "llm_model": model,
-                "data_folder": data_folder if data_folder else None,
-                "embedding_url": embedding_url if embedding_url else None,
-                "embedding_model": embedding_model if embedding_model else None,
+            updates = {
                 "max_iterations": max_iter,
                 "vector_score_threshold": threshold,
                 "chunk_max_chars": chunk_max,
                 "chunk_overlap_chars": chunk_overlap,
-                "debug_mode": debug_mode
-            })
-            
+            }
             os.environ["KB_AGENT_MAX_ITERATIONS"] = str(max_iter)
-            
+
+        elif self.category == "atlassian":
+            jira_url = self.query_one("#jira_url").value.strip()
+            jira_token = self.query_one("#jira_token").value.strip()
+            conf_url = self.query_one("#confluence_url").value.strip()
+            conf_token = self.query_one("#confluence_token").value.strip()
+            updates = {
+                "jira_url": jira_url or None,
+                "jira_token": jira_token or None,
+                "confluence_url": conf_url or None,
+                "confluence_token": conf_token or None,
+            }
+
+        elif self.category == "general":
+            data_folder = self.query_one("#data_folder").value.strip()
+            debug_mode_raw = self.query_one("#debug_mode").value.strip().lower()
+            debug_mode = debug_mode_raw in ("true", "1", "yes", "t", "y")
+            updates = {
+                "data_folder": data_folder or None,
+                "debug_mode": debug_mode,
+            }
+
+        # Merge with existing settings
+        new_settings_data = {}
+        if config.settings:
+            from pydantic import SecretStr
+            new_settings_data = config.settings.model_dump(mode='json')
+            # model_dump masks SecretStr as '**********'; unpack to real values
+            for field_name, value in config.settings:
+                if isinstance(value, SecretStr):
+                    new_settings_data[field_name] = value.get_secret_value()
+        new_settings_data.update(updates)
+
+        try:
             new_settings = config.Settings(**new_settings_data)
             config.save_settings(new_settings)
-
             if config.load_settings():
+                self.notify("Settings saved.", severity="information")
                 self.dismiss(True)
             else:
                 self.notify("Invalid settings.", severity="error")
+        except Exception as e:
+            err_msg = "Validation Error"
+            if hasattr(e, 'errors'):
+                errs = [str(err.get('loc', [''])[0]) for err in e.errors() if 'loc' in err]
+                if errs:
+                    err_msg = f"Invalid format for: {', '.join(errs)}"
+            self.notify(err_msg, severity="error")
+
+
+# Backward-compatible alias so existing references & tests keep working
+SettingsScreen = SettingsCategoryScreen
+
+
+class ConfluenceSyncScreen(ModalScreen[dict]):
+    """Modal for configuring Confluence sync."""
+
+    CSS = """
+    ConfluenceSyncScreen { align: center middle; }
+    #sync-dialog {
+        grid-size: 2;
+        grid-gutter: 1 2;
+        grid-rows: auto auto auto auto;
+        padding: 1 2;
+        width: 50;
+        height: auto;
+        border: thick $primary 60%;
+        background: $surface;
+    }
+    #sync-title {
+        column-span: 2;
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    .sync-label { height: 1; content-align: left middle; color: $text-muted; }
+    .sync-input { width: 100%; }
+    #sync-buttons {
+        column-span: 2;
+        height: 3;
+        align: center middle;
+    }
+    #sync-buttons Button { margin: 0 1; min-width: 16; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Grid(id="sync-dialog"):
+            yield Label("Sync Confluence Tree", id="sync-title")
+            yield Label("Root Page ID", classes="sync-label")
+            yield Input(placeholder="e.g. 12345678", id="root_page_id", classes="sync-input")
+            yield Label("Crawl Depth (1-3)", classes="sync-label")
+            yield Input(value="3", id="crawl_depth", classes="sync-input")
+            with Horizontal(id="sync-buttons"):
+                yield Button("Start Sync", id="start")
+                yield Button("Cancel", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "start":
+            page_id = self.query_one("#root_page_id").value.strip()
+            depth_str = self.query_one("#crawl_depth").value.strip()
+            if not page_id:
+                self.notify("Page ID is required", severity="error")
+                return
+            try:
+                depth = int(depth_str)
+                if depth < 1 or depth > 3:
+                    raise ValueError()
+            except ValueError:
+                self.notify("Depth must be between 1 and 3", severity="error")
+                return
+            self.dismiss({"page_id": page_id, "depth": depth})
         else:
-            self.dismiss(False)
-
-
-# ChatModeScreen removed.
+            self.dismiss(None)
 
 
 # ─── Web Engine Selection Modal ──────────────────────────────────────────────
@@ -362,7 +583,7 @@ class CommandPalette(Container):
         background: $accent;
     }
     CommandPalette .cmd-name {
-        width: 16;
+        width: 20;
         color: $text;
     }
     CommandPalette .cmd-desc {
@@ -906,10 +1127,60 @@ class KBAgentApp(App):
                 log.write("[yellow]Usage: /index <url | jira_id | confluence_id>[/yellow]")
             else:
                 self._run_index_command(parts[1])
+        elif cmd == "/sync_confluence":
+            self.push_screen(ConfluenceSyncScreen(), self._run_confluence_sync)
         elif cmd == "/quit":
             self.exit()
         else:
             log.write(f"[red]Unknown command: {cmd}[/red]  [dim]Type /help[/dim]")
+
+    def _run_confluence_sync(self, result: dict | None):
+        if result:
+            self._run_confluence_sync_worker(result["page_id"], result["depth"])
+
+    @work(thread=True, exclusive=True)
+    def _run_confluence_sync_worker(self, page_id: str, depth: int):
+        log = self.query_one("#chat-log", RichLog)
+
+        self.call_from_thread(self._refresh_status, "thinking", f"Syncing Confluence (Page {page_id}, Depth {depth})...")
+        self.call_from_thread(log.write, "")
+        self.call_from_thread(log.write, f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]")
+        self.call_from_thread(log.write, f"  [dim]Starting Confluence sync for Root ID {page_id} up to depth {depth}...[/dim]")
+
+        from kb_agent.connectors.confluence import ConfluenceConnector
+        import re
+
+        try:
+            connector = ConfluenceConnector()
+
+            def progress_cb(count, title):
+                self.call_from_thread(log.write, f"  [dim]✓ [{count}] Fetched: {title}[/dim]")
+
+            pages = connector.crawl_tree(page_id, max_depth=depth, on_progress=progress_cb)
+
+            output_dir = Path(config.settings.data_folder) / "source" / "confluence" if config.settings and config.settings.data_folder else Path("source/confluence")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            saved_count = 0
+            for page in pages:
+                space = page["metadata"].get("space", "UNKNOWN")
+                p_id = page["id"]
+                title = page["title"]
+                safe_title = re.sub(r'[^\w\-]', '_', title)
+                filename = f"{space}_{p_id}_{safe_title}.md"
+
+                filepath = output_dir / filename
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(page["content"])
+                saved_count += 1
+
+            msg = f"✓ Sync complete! Saved {saved_count} pages to `source/confluence/`\n\nRun `/index` or `kb-agent index` to update the search index."
+            self.call_from_thread(log.write, Padding(Markdown(msg), (0, 0, 0, 2)))
+
+        except Exception as e:
+            self.call_from_thread(log.write, f"\n[red]✗ Sync failed: {e}[/red]")
+        finally:
+            self.call_from_thread(self._refresh_status, "idle")
 
     # ─── Query Worker ─────────────────────────────────────────────────────
 
@@ -1023,17 +1294,17 @@ class KBAgentApp(App):
                     # Normalize: source/X.pdf → index/X.md just to have something safe
                     original_path = self._normalize_file_path(raw_path)
                 
-                # Fetch original filename and derive archive link
+                # Fetch original filename and derive index link
                 import urllib.parse
                 fname = os.path.basename(original_path)
                 stem = os.path.splitext(fname)[0]
                 
-                # The cli.py archives files using only their stem (no extension)
-                archive_file_path = str(config.settings.archive_path.absolute() / stem)
+                # After indexing, files live in index_path as .md
+                index_file_path = str(config.settings.index_path.absolute() / f"{stem}.md")
                 
                 # Use standard 'file://' prefix with URL encoding to pass to terminal
-                encoded_path = urllib.parse.quote(archive_file_path)
-                archive_link = f"file://{encoded_path}"
+                encoded_path = urllib.parse.quote(index_file_path)
+                index_link = f"file://{encoded_path}"
 
                 if fname in seen_files:
                     continue
@@ -1041,7 +1312,7 @@ class KBAgentApp(App):
 
                 score = c.get("score", float("inf"))
                 desc = c.get("content", "")[:80].replace("|", " ").replace("\n", " ").strip()
-                top_files.append((fname, archive_link, score, desc))
+                top_files.append((fname, index_link, score, desc))
                 if len(top_files) >= 5:
                     break
 
