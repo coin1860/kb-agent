@@ -13,23 +13,20 @@ KB Agent 采用 **6 节点自适应 CRAG (Corrective RAG)** 拓扑，由 [LangGr
 
 ```mermaid
 graph TD
-    Start(["🎯 User Query"]) --> Analyze
+    Start(["🎯 User Query"]) --> Plan
 
-    subgraph "LangGraph StateGraph (max 3 iterations)"
-        Analyze["🧭 analyze_and_route<br/>意图分类 + 查询分解<br/><i>LLM Call #1</i>"]
-        Plan["🧠 plan<br/>工具选择与参数规划<br/><i>LLM Call #2</i>"]
-        ToolExec["🔍 tool_exec<br/>Execute Supported Tools:<br/>- hybrid_search<br/>- vector_search<br/>- grep_search<br/>- local_file_qa<br/>- read_file<br/>- graph_related<br/>- jira_fetch<br/>- confluence_fetch<br/>- web_fetch<br/>- index_command<br/><i>No LLM Call</i>"]
-        Grade["⚖️ grade_evidence<br/>CRAG 证据评分<br/><i>LLM Call #3</i>"]
-        Synth["✨ synthesize<br/>带引用的答案生成<br/><i>LLM Call #4</i>"]
+    subgraph "LangGraph StateGraph (Adaptive Loop)"
+        Plan["🧠 plan<br/>Tool Selection / Decomposition<br/><i>LLM Call #1 (Round 0: Decomposition)</i>"]
+        ToolExec["🔍 tool_exec<br/>Execute Supported Tools:<br/>- vector_search / read_file<br/>- jira_fetch / jira_jql<br/>- confluence_fetch<br/>- csv_info / csv_query<br/>- web_fetch<br/><i>No LLM Call</i>"]
+        Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #2</i>"]
+        Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #3</i>"]
 
-        Analyze --> Plan
         Plan --> ToolExec
         ToolExec --> Grade
 
         Grade -->|"✅ GENERATE<br/>avg ≥ 0.7"| Synth
-        Grade -->|"🔄 REFINE<br/>0.3 ≤ avg < 0.7<br/>& iter < 3"| Plan
-        Grade -->|"🗑️ RE_RETRIEVE<br/>avg < 0.3<br/>& iter < 3"| Analyze
-        Grade -->|"⏱️ Max Iterations<br/>iter ≥ 3"| Synth
+        Grade -->|"🔄 REFINE / RE_RETRIEVE<br/>avg < 0.7<br/>& iter < max"| Plan
+        Grade -->|"⏱️ Max Iterations"| Synth
     end
 
     Synth --> Mask["🛡️ Security Masking"]
@@ -37,7 +34,6 @@ graph TD
 
     style Start fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
     style End fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
-    style Analyze fill:#e3f2fd,stroke:#1565c0,color:#000
     style Plan fill:#e3f2fd,stroke:#1565c0,color:#000
     style ToolExec fill:#e8f5e9,stroke:#2e7d32,color:#000
     style Grade fill:#fff3e0,stroke:#ef6c00,color:#000
@@ -62,10 +58,10 @@ graph TD
 
 | Intent Type | 首选工具 | 示例查询 |
 |---|---|---|
-| `exact` | `grep_search` | "PROJ-123 状态", "KB_AGENT_MAX_ITERATIONS" |
-| `conceptual` | `vector_search` / `hybrid_search` | "索引流水线怎么工作的？" |
-| `relational` | `graph_related` | "PROJ-100 关联了哪些 ticket？" |
-| `file_discovery` | `local_file_qa` | "查找关于认证的文件" |
+| `exact` | `read_file` | "查一下 docs/auth.md", "L10-L100" |
+| `conceptual` | `vector_search` | "索引流水线怎么工作的？" |
+| `external` | `jira_jql` / `jira_fetch` | "我的未解决任务", "PROJ-100" |
+| `csv` | `csv_query` | "统计 dataset.csv 的销售额" |
 
 ---
 
@@ -96,40 +92,27 @@ graph TD
 **可用工具 (9 个)**:
 
 ```mermaid
-graph LR
-    subgraph "Keyword Search"
-        A["grep_search<br/>ripgrep + BM25"]
-    end
-    subgraph "Semantic Search"
+    subgraph "Knowledge Retrieval"
         B["vector_search<br/>ChromaDB"]
+        E["read_file<br/>±100 Lines Support"]
     end
-    subgraph "Hybrid"
-        C["hybrid_search<br/>BM25 + Vector → RRF"]
-    end
-    subgraph "Knowledge Graph"
-        D["graph_related<br/>NetworkX"]
-    end
-    subgraph "File Operations"
-        E["read_file"]
-        F["local_file_qa"]
-        J["index_command"]
-    end
-    subgraph "External"
-        G["jira_fetch"]
+    subgraph "External Connectors"
+        G["jira_fetch / jira_jql"]
         H["confluence_fetch"]
         I["web_fetch"]
     end
+    subgraph "Data Analysis"
+        K["csv_info<br/>Schema Retrieval"]
+        L["csv_query<br/>Pandas Filters"]
+    end
 
-    style A fill:#e8f5e9,stroke:#2e7d32,color:#000
     style B fill:#e3f2fd,stroke:#1565c0,color:#000
-    style C fill:#fff9c4,stroke:#f9a825,color:#000
-    style D fill:#f3e5f5,stroke:#6a1b9a,color:#000
     style E fill:#fce4ec,stroke:#c62828,color:#000
-    style F fill:#fce4ec,stroke:#c62828,color:#000
     style G fill:#fff3e0,stroke:#ef6c00,color:#000
     style H fill:#fff3e0,stroke:#ef6c00,color:#000
     style I fill:#fff3e0,stroke:#ef6c00,color:#000
-    style J fill:#fce4ec,stroke:#c62828,color:#000
+    style K fill:#fff9c4,stroke:#f9a825,color:#000
+    style L fill:#fff9c4,stroke:#f9a825,color:#000
 ```
 
 ---

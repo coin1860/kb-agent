@@ -59,7 +59,7 @@ class SettingsCategoryScreen(ModalScreen[bool]):
         padding: 1 2;
         width: 50;
         height: auto;
-        border: thick $primary 60%;
+        border: thick darkorange 60%;
         background: $surface;
     }
     #settings-title {
@@ -163,7 +163,7 @@ class SettingsDetailScreen(ModalScreen[bool]):
         height: auto;
         max-height: 80vh;
         overflow-y: auto;
-        border: thick $primary 60%;
+        border: thick darkorange 60%;
         background: $surface;
     }
     #detail-title {
@@ -404,7 +404,7 @@ class ConfluenceSyncScreen(ModalScreen[dict]):
         padding: 1 2;
         width: 50;
         height: auto;
-        border: thick $primary 60%;
+        border: thick darkorange 60%;
         background: $surface;
     }
     #sync-title {
@@ -1024,7 +1024,7 @@ class KBAgentApp(App):
             selected = palette.get_selected()
             palette.hide()
             if selected:
-                if selected in ("/settings", "/web_engine", "/clear", "/quit"):
+                if selected in ("/settings", "/web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
                     ta.clear()
                     self._suppress_palette = 2
                     self._exec_slash(selected)
@@ -1076,7 +1076,7 @@ class KBAgentApp(App):
                 if selected:
                     ta = self.query_one("#chat-input", ChatInput)
                     palette.hide()
-                    if selected == "/settings":
+                    if selected in ("/settings", "/web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
                         ta.clear()
                         self._suppress_palette = 2
                         self._exec_slash(selected)
@@ -1154,15 +1154,13 @@ class KBAgentApp(App):
             connector = ConfluenceConnector()
 
             def progress_cb(count, title):
-                self.call_from_thread(log.write, f"  [dim]✓ [{count}] Fetched: {title}[/dim]")
-
-            pages = connector.crawl_tree(page_id, max_depth=depth, on_progress=progress_cb)
+                self.call_from_thread(log.write, f"  [dim]✓ [{count}] Fetched & Saved: {title}[/dim]")
 
             output_dir = Path(config.settings.data_folder) / "source" / "confluence" if config.settings and config.settings.data_folder else Path("source/confluence")
             output_dir.mkdir(parents=True, exist_ok=True)
 
             saved_count = 0
-            for page in pages:
+            for page in connector.crawl_tree(page_id, max_depth=depth, on_progress=progress_cb):
                 space = page["metadata"].get("space", "UNKNOWN")
                 p_id = page["id"]
                 title = page["title"]
@@ -1436,6 +1434,13 @@ class KBAgentApp(App):
             self.query_one("#btn-copy").display = False
         except:
             pass
+            
+        try:
+            import kb_agent.tools.csv_qa_tool as csv_tool
+            csv_tool.clear_cache()
+        except ImportError:
+            pass
+            
         log.write("[dim]Chat history cleared.[/dim]")
 
     def action_open_settings(self):

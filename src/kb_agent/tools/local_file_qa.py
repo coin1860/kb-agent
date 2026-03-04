@@ -1,62 +1,58 @@
-import json
-from kb_agent.tools.vector_tool import VectorTool
+import os
+from pathlib import Path
+from kb_agent.config import settings
 
 class LocalFileQATool:
     """
-    Search for local markdown files by filename and context keywords.
-    Returns explicitly formatted table entries for Q&A reference.
+    Search for local markdown files by filename prefix in the index directory and return their contents.
     """
     def __init__(self):
-        self._vector_tool = VectorTool()
+        pass
 
     def query(self, search_term: str) -> str:
         """
-        Queries ChromaDB explicitly filtering for type: 'summary' or 'full'.
-        Returns 1-indexed tables of matching filenames.
+        Search for files starting with the given filename prefix in the index directory.
+        If multiple matching files have different extensions, prioritize .md.
+        Returns the content of the file or an error message.
         """
-        # Search the knowledge base via ChromaDB Wrapper
-        # We query for both "full" and "summary" types to maximize surface area
-        where_filter = {
-            "$or": [
-                {"type": "summary"},
-                {"type": "full"}
-            ]
-        }
-        
-        results = self._vector_tool.search(query_text=search_term, n_results=30)
-        
-        if not results:
-            return "No matching files found in the knowledge base."
+        if not settings or not settings.index_path:
+            return "Error: index_path is not configured in settings."
 
-        # Process and format results
-        formatted_rows = []
-        seen_basenames = set()
-        index = 1
+        index_dir = settings.index_path
+        if not index_dir.exists() or not index_dir.is_dir():
+            return f"Error: Index directory {index_dir} does not exist."
 
-        for r in results:
-            metadata = r.get("metadata", {})
-            file_path = metadata.get("related_file", "")
-            
-            if not file_path:
-                continue
+        matching_files = []
+        try:
+            # Strip trailing .md from search_term to make it more flexible
+            clean_search_term = search_term.lower()
+            if clean_search_term.endswith('.md'):
+                clean_search_term = clean_search_term[:-3]
 
-            import os
-            basename = os.path.basename(file_path)
-            
-            if basename in seen_basenames:
-                continue
-                
-            seen_basenames.add(basename)
-            
-            # Simple heuristic for filename vs context match:
-            query_words = [w.lower() for w in search_term.split() if len(w) > 2]
-            is_filename_match = any(qw in basename.lower() for qw in query_words)
-            
-            match_type = "(filename match)" if is_filename_match else "(context match)"
-            
-            formatted_rows.append(f"{index}, {file_path} {match_type}")
-            index += 1
-            if index > 10:
+            for item in index_dir.iterdir():
+                if item.is_file() and item.name.lower().startswith(clean_search_term):
+                    matching_files.append(item)
+        except Exception as e:
+            return f"Error reading index directory: {str(e)}"
+
+        if not matching_files:
+            return f"No files found starting with '{search_term}' in {index_dir}."
+
+        # Prioritize .md
+        target_file = None
+        for file in matching_files:
+            if file.suffix.lower() == '.md':
+                target_file = file
                 break
+        
+        if not target_file:
+            target_file = matching_files[0]
+
+        try:
+            content = target_file.read_text(encoding='utf-8')
+            if len(content) > 8000:
+                content = content[:8000] + "\n\n... (truncated to save tokens)"
             
-        return "\n".join(formatted_rows)
+            return f"File Content for '{target_file.name}':\n\n{content}"
+        except Exception as e:
+            return f"Error reading file {target_file.name}: {str(e)}"

@@ -196,6 +196,8 @@ def _is_tool_applicable(tool_name: str, query: str) -> bool:
     """Validate if a tool is applicable to the given query."""
     if tool_name == "jira_fetch":
         return bool(re.search(r'[A-Z]+-\d+', query))
+    if tool_name == "csv_query":
+        return bool(re.search(r'\.csv', query, re.IGNORECASE))
     if tool_name == "jira_jql":
         return True
     if tool_name == "confluence_fetch":
@@ -209,8 +211,12 @@ def _build_tool_args(tool_name: str, query: str) -> dict[str, str] | None:
     """Build tool arguments based on the tool type and query.
     Returns None if the tool should not be called."""
     query_str = query
-    if tool_name in ("grep_search", "vector_search", "local_file_qa"):
+    if tool_name in ("grep_search", "vector_search"):
         return {"query": query_str}
+    if tool_name == "csv_query":
+        return None  # csv_query requires structured arguments like filename and query_json_str, so fallback extraction isn't well suited. Let LLM extract it correctly.
+    if tool_name == "local_file_qa":
+        return {"filename_prefix": query_str}
         
     if tool_name == "read_file":
         return {"file_path": query_str}
@@ -256,7 +262,7 @@ def _extract_tools_from_text(
         # "grep_search", # TEMPORARILY DISABLED
         "vector_search", "read_file",
         "graph_related", "jira_fetch", "jira_jql", "confluence_fetch",
-        "web_fetch", "local_file_qa"
+        "web_fetch", "local_file_qa", "csv_query"
     ]
 
     found: list[dict[str, Any]] = []
@@ -305,7 +311,9 @@ TOOL_DESCRIPTIONS = """Available tools:
 5. jira_fetch(issue_key: str) — Fetch a Jira issue by key (e.g. 'PROJ-123'). Returns issue details.
 6. jira_jql(query: str) — Convert natural language to Jira JQL and search. Use for semantic queries like "my unresolved tasks".
 7. confluence_fetch(page_id: str) — Fetch a Confluence page by ID or search text.
-8. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches."""
+8. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches.
+9. local_file_qa(filename_prefix: str) — Read a local file from the datastore by its exact filename or prefix (e.g. '银行开户指南'). Use when user specifies a filename to answer Q&A.
+10. csv_query(filename: str, query_json_str: str) — Query a CSV file with a Pandas-compatible condition string and desired columns. Provide condition and columns inside query_json_str formatted as JSON."""
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +330,7 @@ PLAN_SYSTEM = (
     '   [{"name": "vector_search", "args": {"query": "login flow"}}, '
     '{"name": "read_file", "args": {"file_path": "docs/auth.md"}}]\n'
     "3. Start with vector_search for Q&A. If the question is complex or conceptual, YOU MUST issue multiple vector_search queries in parallel.\n"
-    "   **CRITICAL EXCEPTION**: If the user's INTENT is to find/list files (e.g. '查找文件', 'find documents about X'), you MUST use local_file_qa INSTEAD of vector_search to avoid duplicate chunks.\n"
+    "   **CRITICAL EXCEPTION**: If the user asks to read or answer questions about a SPECIFIC file by name (e.g. '根据文件银行开户指南', '打开文件X'), you MUST use local_file_qa with the filename prefix INSTEAD of vector_search.\n"
     "4. If the question mentions a Jira ticket (e.g. PROJ-123), use jira_fetch or graph_related.\n"
     "5. After search returns file paths, use read_file to get full content.\n"
     "6. **INDEX RESOLUTION**: When a user refers to a file by index (e.g. 'Summarize 1', 'Tell me about file 2'), you MUST:\n"
@@ -330,7 +338,7 @@ PLAN_SYSTEM = (
     "   b) Find the line starting with that number (e.g., '1, /path/to/file.md').\n"
     "   c) Extract the EXACT file path as printed (e.g., '/path/to/file.md').\n"
     "   d) Call read_file(file_path=resolved_path).\n"
-    "7. Do NOT call local_file_qa again if the user is asking to summarize a file from a list you just provided.\n"
+    "7. For reading general topics, use vector_search. For reading a specific named file, use local_file_qa.\n"
     "8. Avoid repeating tool calls with the same arguments.\n"
     "9. On subsequent rounds, you will be given 'Context File Hints' (like file paths or Jira IDs) found in previous searches. You MUST prioritize using read_file, jira_fetch, or confluence_fetch on these hints BEFORE trying new vector_search keywords.\n"
     "   - Only rephrase vector searches if no hints exist or hints proved useless.\n"
@@ -342,15 +350,19 @@ DECOMPOSE_SYSTEM = (
     "1. If the user asks about a specific Jira ticket (e.g., FSR-123, WCL-456, PROJ-789), output a 'direct' action for jira_fetch.\n"
     "2. If the user asks to SEARCH/QUERY/LIST Jira issues by criteria (e.g. 'my tasks', 'unresolved bugs', '本周更新的任务'), output a 'direct' action for jira_jql.\n"
     "3. If the user asks about a specific Confluence page ID (e.g., 12345678), output a 'direct' action for confluence_fetch.\n"
-    "4. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
+    "4. If the user asks to query, analyze, or read a .csv file (e.g., 'query dataset.csv for users over 30...'), output a 'direct' action for csv_query with the extracted filename and your intended query_json_str.\n"
+    "5. If the user asks to read, open, or answer questions about a SPECIFIC file by its name (e.g., '打开文件信用卡申请流程.txt', '根据银行开户指南...'), output a 'direct' action for local_file_qa with the extracted filename_prefix.\n"
+    "6. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
     "   - Sub-queries should capture different aspects, synonyms, or keywords of the original question.\n"
     "   - If the question is very simple, use slightly different phrasing for the 3 sub-queries to maximize recall.\n"
     "   - MUST KEEP THE ORIGINAL LANGUAGE. DO NOT TRANSLATE TO ENGLISH IF THE QUERY IS IN CHINESE.\n"
-    "4. Output ONLY valid JSON matching this schema:\n"
+    "7. Output ONLY valid JSON matching this schema:\n"
     '   - For direct: {"action": "direct", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}}\n'
     '   - For direct: {"action": "direct", "tool": "jira_jql", "args": {"query": "my unresolved tasks"}}\n'
+    '   - For direct: {"action": "direct", "tool": "csv_query", "args": {"filename": "dataset.csv", "query_json_str": "{\\"condition\\": \\"Age > 30\\", \\"columns\\": [\\"Name\\"]}"}}\n'
+    '   - For direct: {"action": "direct", "tool": "local_file_qa", "args": {"filename_prefix": "信用卡申请流程"}}\n'
     '   - For decompose: {"action": "decompose", "sub_queries": ["query 1", "query 2", "query 3"]}\n'
-    "5. Do NOT output any other text or explanation."
+    "8. Do NOT output any other text or explanation."
 )
 
 def _decompose_query(query: str, state: AgentState) -> list[dict[str, Any]]:

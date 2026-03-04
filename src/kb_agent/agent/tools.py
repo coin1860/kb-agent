@@ -25,12 +25,13 @@ _jira: object | None = None
 _confluence: object | None = None
 _web: object | None = None
 _local_qa: object | None = None
+_csv_qa: object | None = None
 
 
 def reset_tools_cache():
     """Clear the cached tool instances so they pick up new settings on next use."""
-    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa
-    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = None
+    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa, _csv_qa
+    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = _csv_qa = None
 
 
 def _get_grep():
@@ -96,10 +97,18 @@ def _get_local_qa():
     return _local_qa
 
 
+def _get_csv_qa():
+    global _csv_qa
+    if _csv_qa is None:
+        import kb_agent.tools.csv_qa_tool as csv_tool
+        _csv_qa = csv_tool
+    return _csv_qa
+
+
 def reset_singletons():
     """Reset all lazy singletons — useful for tests."""
-    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa
-    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = None
+    global _grep, _vector, _file, _graph, _jira, _confluence, _web, _local_qa, _csv_qa
+    _grep = _vector = _file = _graph = _jira = _confluence = _web = _local_qa = _csv_qa = None
 
 
 # ---------------------------------------------------------------------------
@@ -267,20 +276,54 @@ def web_fetch(url: str) -> str:
 
 
 @tool
-def local_file_qa(query: str) -> str:
-    """Search for local files by filename and context keywords.
+def local_file_qa(filename_prefix: str) -> str:
+    """Read a local file by its filename prefix in the datastore to answer Q&A.
     
-    Use this when the user explicitly asks to "Find files related to X" or
-    "Search for files" or when you need a numbered list of files to reference
-    in subsequent questions (e.g. "Summarize file 1").
+    Use this when the user provides a specific filename (e.g., '银行开户指南' or 
+    from the /file search command) and asks a question about its contents 
+    (e.g., "what to prepare for account opening?").
 
     Args:
-        query: The semantic keywords or filename to search for.
+        filename_prefix: The exact filename or prefix to search for.
 
     Returns:
-        A 1-indexed formatted string table of matching files.
+        The text content of the matching file.
     """
-    return _get_local_qa().query(query)
+    return _get_local_qa().query(filename_prefix)
+
+
+@tool
+def csv_info(filename: str) -> str:
+    """Get the schema and a small sample of a CSV file.
+
+    Use this FIRST before querying any CSV file to understand its structure
+    and verify column names.
+
+    Args:
+        filename: Name of the CSV file.
+
+    Returns:
+        A markdown string containing the schema and a sample of the data.
+    """
+    return _get_csv_qa().get_csv_schema_and_sample(filename)
+
+
+@tool
+def csv_query(filename: str, query_json_str: str) -> str:
+    """Query a CSV file using a structured JSON containing 'condition' and 'columns'.
+
+    CRITICAL INSTRUCTION:
+    DO NOT guess the column names. You MUST call the `csv_info` tool first to get 
+    the correct headers and schema before you ever use this tool.
+    
+    Args:
+        filename: Name of the CSV file to query (e.g. 'dataset.csv')
+        query_json_str: A JSON string with 'condition' (pandas query string) and 'columns' (list of columns).
+
+    Returns:
+        Markdown table of the queried results.
+    """
+    return _get_csv_qa().csv_query(filename, query_json_str)
 
 
 # Convenience list for graph construction
@@ -292,5 +335,8 @@ ALL_TOOLS = [
     jira_fetch,
     jira_jql,
     confluence_fetch,
-    web_fetch
+    web_fetch,
+    local_file_qa,
+    csv_info,
+    csv_query
 ]

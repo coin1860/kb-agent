@@ -62,7 +62,8 @@ def run_indexing():
             
             # Archive the file
             if source_path and os.path.exists(source_path):
-                dest_path = settings.archive_path / file_id
+                source_filename = os.path.basename(source_path)
+                dest_path = settings.archive_path / source_filename
                 # If file already exists in archive, handle it (e.g., overwrite or suffix)
                 # Here we just move/overwrite for simplicity as per user request to avoid re-indexing
                 shutil.move(source_path, dest_path)

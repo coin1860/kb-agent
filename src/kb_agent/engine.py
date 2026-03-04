@@ -163,15 +163,6 @@ class Engine:
                     all_content.append(f"Error fetching {url}: {doc['content']}")
                     continue
 
-                if mode == "knowledge_base":
-                    _status("📝", f"Processing content from {doc['title']}...")
-                    try:
-                        processor = Processor(self._docs_path)
-                        processor.process(doc)
-                        log_audit("web_fetch", {"url": url, "doc_id": doc["id"]})
-                    except Exception as e:
-                        logger.warning(f"Processor failed for {url}: {e}")
-
                 all_content.append(
                     f"Source: {url}\nTitle: {doc['title']}\n\n{doc['content']}"
                 )

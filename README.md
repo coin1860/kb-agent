@@ -28,12 +28,12 @@ Designed for **high-security banking environments**, it provides traceability, a
 
 ### 🧠 Adaptive CRAG with LangGraph
 
-* **Query Intent Decomposition**: Incoming queries are analyzed and split into 3 parallel sub-queries for maximum recall.
+* **Query Intent Decomposition**: Incoming queries are analyzed and split into parallel sub-queries for maximum recall.
 * **Intelligent Retry**: Follows discovered context clues (Jira IDs, File Paths, Confluence Pages) on retry rounds instead of blindly re-searching.
 * **CRAG Evidence Grading**: Each evidence item is scored 0.0–1.0. The system routes to GENERATE (avg ≥ 0.7), REFINE (0.3–0.7), or RE-RETRIEVE (< 0.3).
-* **Source Citations**: Answers include inline `[N]` references and a citation footer with file paths and line numbers.
+* **Interactive Source Citations**: Answers include clickable references; click to view the full source chunk in a modal window.
 * **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history.
-* **Multi-Turn Conversation**: Full conversation history is passed through the agent state, enabling natural follow-up questions.
+* **CSV Data Analysis**: Native support for querying large CSV files using structured Pandas filters, avoiding truncation issues in standard vector indexing.
 * **Recursive Reasoning Loop**: `Decompose → Plan → Execute → Grade → (loop or answer)` with a configurable iteration cap (default 3).
 
 > 📖 **[Architecture Deep-Dive →](docs/agentic-rag-architecture.md)** — Mermaid diagrams, LLM call analysis, and enhancement roadmap.
@@ -43,14 +43,16 @@ Designed for **high-security banking environments**, it provides traceability, a
 | Tool | Backend | Purpose |
 |---|---|---|
 | `vector_search` | ChromaDB | Semantic similarity search over indexed documents |
-| `read_file` | FileTool | Read full document content (auto-resolves `source/` → `index/`) |
-| `jira_fetch` | Jira REST API | Fetch Jira issue details by key |
-| `jira_jql` | Jira REST API | Natural language → JQL search (e.g. "my unresolved tasks") |
-| `confluence_fetch` | Confluence REST API | Fetch Confluence page by ID/title |
-| `web_fetch` | HTTP + HTML→MD | Fetch and convert web pages (markdownify or crawl4ai) |
-| `local_file_qa` | Vector + Filename | File discovery and Q&A on specific files |
-| `graph_related` | NetworkX | Traverse Knowledge Graph relationships |
-| `grep_search` | Ripgrep + BM25 | Keyword search with context windows |
+| `read_file` | FileTool | Read document content (supports `start_line`/`end_line` for partial reads) |
+| `jira_fetch` | Jira API | Fetch Jira issue details (includes sub-tasks and linked issues) |
+| `jira_jql` | Jira API | Natural language → JQL search (e.g. "my unresolved tasks") |
+| `confluence_fetch`| Confluence API| Fetch Confluence page details by ID or title |
+| `web_fetch` | HTTP + HTML→MD| Fetch and convert web pages (markdownify or crawl4ai) |
+| `local_file_qa` | Vector + Filename| File discovery and Q&A on specific files |
+| `csv_info` | Pandas | Get CSV schema (columns, types) and data sample |
+| `csv_query` | Pandas | Query CSV using structured JSON (filters and column selection) |
+| `graph_related`* | NetworkX | Traverse Knowledge Graph relationships (*Experimental*) |
+| `grep_search`* | Ripgrep | Keyword search with context windows (*Disabled*) |
 
 ### 🕸️ Knowledge Graph
 
@@ -81,22 +83,19 @@ Designed for **high-security banking environments**, it provides traceability, a
 
 ```mermaid
 graph TD
-    Start(["🎯 User Query"]) --> Decompose
+    Start(["🎯 User Query"]) --> Plan
 
-    subgraph "LangGraph StateGraph (max N iterations)"
-        Decompose["🧭 decompose_query<br/>LLM Query Analysis<br/><i>Direct routing or sub-query split</i>"]
-        Plan["🧠 plan<br/>Tool Selection<br/><i>LLM Call</i>"]
-        ToolExec["🔍 tool_exec<br/>Execute Tools:<br/>- vector_search<br/>- read_file<br/>- jira_fetch / jira_jql<br/>- confluence_fetch<br/>- web_fetch"]
-        Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call</i>"]
-        Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call</i>"]
+    subgraph "LangGraph StateGraph (Adaptive Loop)"
+        Plan["🧠 plan<br/>Tool Selection / Decomposition<br/><i>LLM Call #1 (Round 0: Decomposition)</i>"]
+        ToolExec["🔍 tool_exec<br/>Execute Tools:<br/>- vector_search / read_file<br/>- jira_fetch / jira_jql<br/>- confluence_fetch<br/>- csv_info / csv_query<br/>- web_fetch"]
+        Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #2</i>"]
+        Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #3</i>"]
 
-        Decompose --> Plan
         Plan --> ToolExec
         ToolExec --> Grade
         Grade -->|"✅ GENERATE<br/>avg ≥ 0.7"| Synth
-        Grade -->|"🔄 REFINE<br/>0.3 ≤ avg < 0.7<br/>& iter < max"| Plan
-        Grade -->|"🗑️ RE_RETRIEVE<br/>avg < 0.3<br/>& iter < max"| Decompose
-        Grade -->|"⏱️ iter ≥ max"| Synth
+        Grade -->|"🔄 REFINE / RE_RETRIEVE<br/>avg < 0.7<br/>& iter < max"| Plan
+        Grade -->|"⏱️ Max Iterations"| Synth
     end
 
     Synth --> Mask["🛡️ Security Masking"]
@@ -275,6 +274,7 @@ src/kb_agent/
 │   ├── grep_tool.py    # Ripgrep wrapper
 │   ├── vector_tool.py  # ChromaDB wrapper
 │   ├── graph_tool.py   # Graph traversal tool
+│   ├── csv_qa_tool.py  # CSV schema & query execution
 │   └── file_tool.py    # File reader (auto source→index resolution)
 └── connectors/
     ├── base.py          # Base connector interface

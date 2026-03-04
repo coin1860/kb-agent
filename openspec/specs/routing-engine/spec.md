@@ -17,7 +17,7 @@ The system SHALL support a standard conversational mode ("normal") that directly
 - **AND** the system returns a direct LLM response using the provided chat history
 
 ### Requirement: Answer queries via Agentic RAG
-The system SHALL use an iterative LangGraph-based workflow ("knowledge_base" mode) with a self-adaptive topology that includes conditional edges for fast-path routing based on query complexity, replacing the previous fixed-path 6-node flow. The `tool_node` MUST encapsulate JSON array results from tools like `vector_search` into individual context items rather than a single merged string, ensuring the `grade_evidence_node` correctly evaluates each chunk.
+The system SHALL use an iterative LangGraph-based workflow ("knowledge_base" mode) with a self-adaptive topology that includes conditional edges for fast-path routing based on query complexity, replacing the previous fixed-path 6-node flow. The `tool_node` MUST encapsulate JSON array results from tools like `vector_search` into individual context items rather than a single merged string, ensuring the `grade_evidence_node` correctly evaluates each chunk. For queries explicitly requesting analysis, reading, or querying of a `.csv` file, the `analyze_and_route` node MUST bypass vector search decomposition and output a `"direct"` action to invoke the `csv_query` tool with the extracted filename and user question.
 
 #### Scenario: Chitchat query fast-path
 - **WHEN** the user submits a query and `mode="knowledge_base"` and `analyze_and_route` classifies complexity as `"chitchat"`
@@ -52,6 +52,11 @@ The system SHALL use an iterative LangGraph-based workflow ("knowledge_base" mod
 - **THEN** the `tool_node` appends 5 distinct formatted items to `new_context`
 - **AND** the `grade_evidence_node` receives all 5 items and properly triggers the LLM grading (since 5 > auto_approve_max_items).
 
+#### Scenario: Direct routing for CSV queries
+- **WHEN** the user explicitly asks to query, analyze, or read a `.csv` file (e.g., "query dataset.csv for users over 30")
+- **THEN** the `analyze_and_route` node MUST classify the action as `"direct"`
+- **AND** route to the `csv_query` tool, extracting the filename and the specific question without decomposing into vector search queries
+
 ### Requirement: Generate answers with source citations and LLM stats
 The system SHALL include source citations in the synthesized answer, referencing the file path and line number of each piece of evidence used, and SHALL append a final formatted block containing aggregated LLM usage statistics (API calls and total tokens) accumulated from the `AgentState`. The system MUST ensure that these statistics are only appended once by filtering out any hallucinated or previously appended stats blocks from the conversation history before it is passed to the LLM.
 
@@ -76,15 +81,15 @@ The system SHALL include source citations in the synthesized answer, referencing
 - **THEN** the system filters them out from the prompt
 - **AND** the final answer contains only exactly one correct `LLM Usage Stats` block appended by the system.
 
-### Requirement: Automatic web URL resolution
-The system SHALL intercept HTTP URLs in user queries, fetch their content, and use it as ad-hoc context to answer the user's question, bypassing the standard RAG or local index database. When fetching raw HTML, the system must robustly filter out non-content elements without inadvertently destroying the main article container itself.
+### Requirement: Disable Automatic Ingestion on Query
+When a URL is detected in a user query, the system shall fetch and use the content to answer the question, but shall not save or index the content into the permanent knowledge base automatically.
 
-#### Scenario: Query contains a URL
-- **WHEN** the user provides the query "Summarize this page https://example.com/spec"
-- **THEN** the system detects the URL via regex
-- **AND** the system fetches the web content
-- **AND** the system optionally processes it into the index if in knowledge_base mode
-- **AND** the system answers the user's implicit or explicit question using only that fetched content
+#### Scenario: User pastes a URL and asks a question
+- **WHEN** the user provided query contains one or more URLs
+- **AND** the system is in Knowledge Base (RAG) mode
+- **THEN** the system shall fetch the URL content
+- **AND** use the content to generate an answer
+- **AND** DO NOT call the indexing processor to store the content in Chroma DB or the files database.
 
 #### Scenario: Aggressive Layouts (e.g., GitHub Repos)
 - **WHEN** the `web_connector` (via `markdownify` engine) processes a page with layout parent classes containing "sidebar" or "banner"

@@ -6,7 +6,7 @@ Authentication: Basic auth using email + API token (Atlassian Cloud)
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Generator
 from markdownify import markdownify as md
 from atlassian import Confluence
 
@@ -121,12 +121,11 @@ class ConfluenceConnector(BaseConnector):
     # crawl_tree - BFS traversal
     # ------------------------------------------------------------------
 
-    def crawl_tree(self, root_page_id: str, max_depth: int = 3, on_progress=None) -> List[Dict[str, Any]]:
+    def crawl_tree(self, root_page_id: str, max_depth: int = 3, on_progress=None) -> Generator[Dict[str, Any], None, None]:
         """BFS crawl of a Confluence page tree."""
         if not self._is_configured:
             raise ValueError("Confluence connector is not configured.")
             
-        pages = []
         queue = [(root_page_id, 0)]  # (page_id, current_depth)
         visited = set()
         total_found = 0
@@ -144,7 +143,8 @@ class ConfluenceConnector(BaseConnector):
                     expand="body.storage,space,version,ancestors"
                 )
                 formatted_page = self._format_page(page_data)
-                pages.append(formatted_page)
+                
+                yield formatted_page
                 total_found += 1
                 
                 if on_progress:
@@ -159,8 +159,6 @@ class ConfluenceConnector(BaseConnector):
                             
             except Exception as e:
                 logger.error(f"Failed to crawl Confluence page {page_id}: {e}")
-                
-        return pages
 
     # ------------------------------------------------------------------
     # Helpers

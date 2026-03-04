@@ -1,1 +1,0 @@
-It appears there is no document text provided. Please paste the document text you would like me to summarize, and I will be happy to assist you.
