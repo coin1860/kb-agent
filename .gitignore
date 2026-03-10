@@ -17,3 +17,5 @@ share/
 include/
 pyvenv.cfg
 # docs/ removed to allow tracking
+models/bge-small-zh-v1.5
+models/bge-small-zh-v1.5/
