@@ -239,13 +239,18 @@ def jira_jql(query: str) -> str:
 
 @tool
 def confluence_fetch(page_id: str) -> str:
-    """Fetch a Confluence page by its ID or search for pages by text.
+    """Fetch a Confluence page by its numeric ID or search for pages by text.
 
-    Use this when the user mentions a Confluence page or you discover a
-    linked page via the Knowledge Graph.
+    Use this tool when:
+    - The user mentions a Confluence page ID (a 5+ digit number like 132123, 456789)
+    - The user says "confluence" followed by a number
+    - The user provides a bare numeric ID and asks to read/summarize/explain it
+    - You discover a linked page via the Knowledge Graph
+
+    This is the PRIMARY tool for retrieving Confluence page content.
 
     Args:
-        page_id: Confluence page ID (numeric) or search text.
+        page_id: Confluence page ID (numeric, e.g. '132123') or search text.
 
     Returns:
         JSON with id, title, content, and metadata of the page(s).

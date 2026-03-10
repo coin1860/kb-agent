@@ -24,13 +24,13 @@ from kb_agent.config import load_settings
 
 SLASH_COMMANDS = [
     ("/clear", "Clear chat history"),
+    ("/file_search", "Search files in the knowledge base"),
     ("/help", "Show available commands"),
     ("/index", "Index a URL, Jira ticket, or Confluence page"),
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
     ("/sync_confluence", "Sync Confluence page tree"),
     ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
-    ("/file_search", "Search files in the knowledge base"),
 ]
 
 
@@ -221,6 +221,7 @@ class SettingsDetailScreen(ModalScreen[bool]):
         model = s.llm_model if s and s.llm_model else "gpt-4"
         emb_url = s.embedding_url if s and s.embedding_url else ""
         emb_model = s.embedding_model if s and s.embedding_model else ""
+        emb_model_path = str(s.embedding_model_path) if s and s.embedding_model_path else ""
 
         yield Label("API Key", classes="settings-label", id="lbl-api-key")
         yield Input(placeholder="sk-...", value=api_key, password=False, id="api_key", classes="settings-input")
@@ -232,6 +233,8 @@ class SettingsDetailScreen(ModalScreen[bool]):
         yield Input(placeholder="http://localhost:7999/v1", value=emb_url, id="embedding_url", classes="settings-input")
         yield Label("Embedding Model", classes="settings-label", id="lbl-embedding-model")
         yield Input(placeholder="all-MiniLM-L6-v2", value=emb_model, id="embedding_model", classes="settings-input")
+        yield Label("Local Model Path", classes="settings-label", id="lbl-embedding-model-path")
+        yield Input(placeholder="/path/to/local/models", value=emb_model_path, id="embedding_model_path", classes="settings-input")
 
     def _compose_rag(self):
         s = config.settings
@@ -296,9 +299,13 @@ class SettingsDetailScreen(ModalScreen[bool]):
             model = self.query_one("#model_name").value.strip() or "gpt-4"
             emb_url = self.query_one("#embedding_url").value.strip()
             emb_model = self.query_one("#embedding_model").value.strip()
+            emb_model_path = self.query_one("#embedding_model_path").value.strip()
             if not api_key:
-                self.notify("API Key is required!", severity="error")
-                return
+                # Accept empty API key if base_url is a local endpoint
+                if "localhost" not in base_url and "127.0.0.1" not in base_url:
+                    self.notify("API Key is required for remote models!", severity="error")
+                    return
+                # Otherwise, it's local, we use a placeholder or None.
             if not base_url:
                 self.notify("Base URL is required!", severity="error")
                 return
@@ -308,6 +315,7 @@ class SettingsDetailScreen(ModalScreen[bool]):
                 "llm_model": model,
                 "embedding_url": emb_url or None,
                 "embedding_model": emb_model or None,
+                "embedding_model_path": emb_model_path or None,
             }
 
         elif self.category == "rag":

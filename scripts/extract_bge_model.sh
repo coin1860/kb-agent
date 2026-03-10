@@ -12,7 +12,7 @@ mkdir -p "${TARGET_DIR}"
 echo "Assembling and extracting the model parts..."
 
 # Concatenate all png chunks, decompress, and extract
-cat "${SOURCE_DIR}/bge_part_*.png" | xz -d | tar -x -C "${TARGET_DIR}"
+cat "${SOURCE_DIR}"/bge_part_*.png | xz -d | tar -x -C "${TARGET_DIR}"
 
 if [ $? -eq 0 ]; then
     echo "Extraction successful! The model is restored to: ${TARGET_DIR}/bge-small-zh-v1.5"

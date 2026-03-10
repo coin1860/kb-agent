@@ -34,6 +34,8 @@ Designed for **high-security banking environments**, it provides traceability, a
 * **Interactive Source Citations**: Answers include clickable references; click to view the full source chunk in a modal window.
 * **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history.
 * **CSV Data Analysis**: Native support for querying large CSV files using structured Pandas filters, avoiding truncation issues in standard vector indexing.
+* **Stateful Routing**: Dedicated `analyze_and_route` gateway resolves pronouns, extracts active entities (Jira/Confluence IDs), and routes chitchat vs. retrieval queries.
+* **Local ONNX Embeddings**: Run fully offline with local ONNX embedding models — no internet or PyTorch required.
 * **Recursive Reasoning Loop**: `Decompose → Plan → Execute → Grade → (loop or answer)` with a configurable iteration cap (default 3).
 
 > 📖 **[Architecture Deep-Dive →](docs/agentic-rag-architecture.md)** — Mermaid diagrams, LLM call analysis, and enhancement roadmap.
@@ -169,6 +171,29 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install .
 ```
 
+**4. (Optional) Local LLM Support**
+If you want to run a local GGUF model instead of using a cloud API:
+```bash
+# macOS Apple Silicon (M1/M2/M3/M4) - Metal GPU acceleration is automatic
+pip install "llama-cpp-python[server]"
+
+# Windows x86 - CPU only
+pip install "llama-cpp-python[server]"
+
+# Windows x86 - NVIDIA GPU
+# set CMAKE_ARGS="-DGGML_CUDA=on"
+# pip install "llama-cpp-python[server]"
+```
+Start the local server (it will automatically find the model based on your `.env` settings):
+```bash
+# macOS/Linux
+./scripts/llm_server.sh start
+
+# Windows
+scripts\llm_server.bat start
+```
+Then configure your TUI settings or `.env` to point `Base URL` to `http://localhost:8081/v1`.
+
 ### ⚙️ Configuration
 
 The agent can be configured via environment variables or via the **TUI Settings screen** (Ctrl+S).
@@ -303,7 +328,7 @@ python3 -m pytest tests/ -v
 
 ### OpenSpec Workflow
 
-This project uses the **OpenSpec** methodology for managing changes. Specs live under `openspec/specs/` and cover 21 capabilities across retrieval, routing, synthesis, ingestion, and observability.
+This project uses the **OpenSpec** methodology for managing changes. Specs live under `openspec/specs/` and cover 27 capabilities across retrieval, routing, synthesis, ingestion, and observability.
 
 ```bash
 # List active changes

@@ -32,6 +32,8 @@ dependencies = [
     "rank-bm25>=0.2.0",
     "pymupdf>=1.27.1",
     "atlassian-python-api>=3.41.0",
+    "onnxruntime>=1.15.0",
+    "tokenizers>=0.13.0",
 ]
 
 [project.scripts]

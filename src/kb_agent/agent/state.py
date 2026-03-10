@@ -23,6 +23,14 @@ class AgentState(TypedDict, total=False):
     """Chat mode: 'knowledge_base' or 'normal'."""
 
     # ── Routing & Analysis ────────────────────────────────────────────────
+    route_decision: str
+    """Route decision from the router: 'direct' or 'search'."""
+
+    resolved_query: str
+    """Query rewritten by the router to resolve pronouns and implicit references."""
+
+    active_entities: list[str]
+    """Entities (e.g. Jira keys, Confluence IDs) explicitly extracted by the router."""
 
     evidence_scores: list[float]
     """Relevance scores (0.0-1.0) for each context item from the grader."""

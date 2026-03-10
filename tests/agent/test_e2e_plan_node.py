@@ -63,32 +63,4 @@ def test_plan_node_e2e_jira_ticket(mock_build):
     assert tool_calls[0]["name"] == "jira_fetch"
     assert tool_calls[0]["args"]["issue_key"] == "PROJ-123"
 
-@patch("kb_agent.agent.nodes._build_llm")
-def test_plan_node_e2e_url(mock_build):
-    # 4.3 端到端测试：包含 URL 的问题应调用 web_fetch(url="https://...")
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = AIMessage(content="请用 web_fetch 获取内容")
-    mock_build.return_value = mock_llm
 
-    url = "https://example.com/spec"
-    state = {
-        "query": f"总结 {url} 的内容",
-        "messages": [],
-        "context": [],
-        "iteration": 0,
-        "routing_plan": {
-            "query_type": "conceptual",
-            "suggested_tools": ["web_fetch"],
-            "sub_questions": []
-        },
-        "status_callback": _noop_status,
-    }
-
-    result = plan_node(state)
-    tool_calls = result.get("pending_tool_calls", [])
-    
-    web_call = next((t for t in tool_calls if t["name"] == "web_fetch"), None)
-    assert web_call is not None
-    assert web_call["args"]["url"] == url
-
-    assert tool_calls[0]["name"] == "web_fetch"

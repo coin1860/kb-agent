@@ -2,17 +2,17 @@
 LangGraph workflow definition for the agentic RAG pipeline.
 
 Topology:
-START → analyze_and_route ─┬─ chitchat ─────────────────────┐
-                           └─ simple/complex → plan        │
-                                                │          │
-                     ┌──────────────────────────┘          │
-                     ▼                                     │
-                 tool_exec ── simple ──────────────────────┤
-                     │                                     │
-                     └─────── complex → grade_evidence     │
+START → analyze_and_route ─┬─ direct ────────────────────────┐
+                           └─ search → plan                 │
+                                        │                   │
+                     ┌──────────────────┘                   │
+                     ▼                                      │
+                 tool_exec ─────────────────────────────────┤
+                     │                                      │
+                     └───────────────→ grade_evidence       │
                                              ├─ GENERATE ─→ synthesize → END
                                              ├─ REFINE ───→ plan (loop)
-                                             └─ RE_RETRIEVE → analyze_and_route (loop)
+                                             └─ RE_RETRIEVE → plan (loop)
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from langgraph.graph import StateGraph, END
 
 from .state import AgentState
 from .nodes import (
+    analyze_and_route_node,
     plan_node,
     tool_node,
     grade_evidence_node,
@@ -56,20 +57,29 @@ def _route_after_tool_exec(state: AgentState) -> str:
     return "grade_evidence"
 
 
+def _route_after_router(state: AgentState) -> str:
+    """Conditional edge after analysis: bypass search for direct answers."""
+    if state.get("route_decision") == "direct":
+        return "synthesize"
+    return "plan"
+
+
 def build_graph() -> StateGraph:
     """Construct (but do not compile) the agentic RAG graph."""
     graph = StateGraph(AgentState)
 
     # Add nodes
+    graph.add_node("analyze_and_route", analyze_and_route_node)
     graph.add_node("plan", plan_node)
     graph.add_node("tool_exec", tool_node)
     graph.add_node("grade_evidence", grade_evidence_node)
     graph.add_node("synthesize", synthesize_node)
 
     # Edges
-    graph.set_entry_point("plan")
+    graph.set_entry_point("analyze_and_route")
+    graph.add_conditional_edges("analyze_and_route", _route_after_router)
     graph.add_edge("plan", "tool_exec")
-    graph.add_conditional_edges("tool_exec", _route_after_tool_exec)
+    graph.add_edge("tool_exec", "grade_evidence")
     graph.add_conditional_edges("grade_evidence", _route_after_grade)
     graph.add_edge("synthesize", END)
 

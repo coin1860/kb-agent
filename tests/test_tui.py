@@ -145,14 +145,14 @@ class TestChatInput:
         async with app.run_test() as pilot:
             ta = app.query_one("#chat-input", ChatInput)
             p = app.query_one("#cmd-palette", CommandPalette)
-            ta.insert("/help")
+            ta.insert("/index")
             await pilot.pause()
             assert p.has_class("visible")
             await pilot.press("enter")  # fills selected command
             await pilot.pause()
-            # Command should be filled into input (not executed yet) for /help
+            # Command should be filled into input (not executed yet) for /index
             text = ta.text.strip()
-            assert text.startswith("/help")
+            assert text.startswith("/index")
 
 
 # ─── Command Palette ─────────────────────────────────────────────────────────

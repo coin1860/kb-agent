@@ -7,10 +7,12 @@ class LLMClient:
         if not settings:
             raise ValueError("Settings not initialized.")
 
+        api_key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
+
         # Determine if Azure or OpenAI based on URL or other settings if needed.
         # For now, assume generic OpenAI-compatible client.
         self.client = OpenAI(
-            api_key=settings.llm_api_key.get_secret_value(),
+            api_key=api_key,
             base_url=str(settings.llm_base_url)
         )
 

@@ -1616,6 +1616,7 @@ dependencies = [
     { name = "markdownify" },
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "onnxruntime" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1630,11 +1631,12 @@ dependencies = [
     { name = "ripgrep-python" },
     { name = "tabulate" },
     { name = "textual" },
+    { name = "tokenizers" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "atlassian-python-api", specifier = ">=4.0.7" },
+    { name = "atlassian-python-api", specifier = ">=3.41.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "chromadb", specifier = ">=0.4.0" },
     { name = "crawl4ai", specifier = ">=0.6.0" },
@@ -1642,6 +1644,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0.0" },
     { name = "markdownify", specifier = ">=0.13.0" },
     { name = "networkx", specifier = ">=3.0.0" },
+    { name = "onnxruntime", specifier = ">=1.15.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pandas", specifier = ">=2.0.0" },
@@ -1655,6 +1658,7 @@ requires-dist = [
     { name = "ripgrep-python", specifier = ">=0.1.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "textual", specifier = ">=0.40.0" },
+    { name = "tokenizers", specifier = ">=0.13.0" },
 ]
 
 [[package]]

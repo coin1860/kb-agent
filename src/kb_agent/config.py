@@ -20,6 +20,7 @@ class Settings(BaseModel):
     # Embedding Configuration
     embedding_url: Optional[str] = Field(None, description="URL for the Embedding API. Empty to use local models.")
     embedding_model: Optional[str] = Field(None, description="Model name for embeddings.")
+    embedding_model_path: Optional[Path] = Field(None, description="Path to a local ONNX embedding model directory. Overrides default if embedding_url is empty.")
     
     # Agent/RAG Configuration
     max_iterations: Optional[int] = Field(None, description="Max iterations for agent RAG loops")

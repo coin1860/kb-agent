@@ -16,6 +16,15 @@ lib/
 share/
 include/
 pyvenv.cfg
-# docs/ removed to allow tracking
-models/bge-small-zh-v1.5
-models/bge-small-zh-v1.5/
+# Knowledge Base Data
+models/
+index/
+data/
+source/
+archive/
+logs/
+.llm_server.pid
+
+# Ensure documentation is tracked
+!docs/
+!docs/**
