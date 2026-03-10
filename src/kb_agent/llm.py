@@ -13,7 +13,8 @@ class LLMClient:
         # For now, assume generic OpenAI-compatible client.
         self.client = OpenAI(
             api_key=api_key,
-            base_url=str(settings.llm_base_url)
+            base_url=str(settings.llm_base_url),
+            timeout=60.0
         )
 
         # Sanitize model name for Groq compatibility

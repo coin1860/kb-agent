@@ -66,6 +66,7 @@ def _build_llm() -> ChatOpenAI:
         base_url=str(settings.llm_base_url),
         model=model_name,
         temperature=0.2,
+        timeout=60,
     )
 
 
@@ -682,7 +683,7 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         is_error = False
         try:
             parsed = json.loads(result_str)
-            if isinstance(parsed, dict) and parsed.get("status") == "error":
+            if isinstance(parsed, dict) and parsed.get("status") in ("error", "no_results"):
                 is_error = True
             elif isinstance(parsed, list) and len(parsed) > 0:
                 is_error = all(item.get("metadata", {}).get("error") for item in parsed if isinstance(item, dict))
@@ -861,6 +862,10 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
     context_items = state.get("context") or []
 
     if not context_items:
+        if iteration >= 2:
+            # Already retried — don't loop again, just let synthesizer say "not found"
+            _emit(state, "⚠️", "No evidence found after retry, ending search")
+            return {"iteration": iteration, "grader_action": "GENERATE"}
         _emit(state, "⚠️", "No evidence to grade, forcing retrieval")
         return {"iteration": iteration, "grader_action": "RE_RETRIEVE"}
 

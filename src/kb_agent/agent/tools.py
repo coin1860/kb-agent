@@ -150,8 +150,7 @@ def vector_search(query: str) -> str:
     if not results:
         return json.dumps({
             "status": "no_results",
-            "tool": "vector_search",
-            "message": f"No relevant documents found for query: '{query}'. Try different keywords."
+            "message": "No relevant documents found for query"
         }, ensure_ascii=False)
     return json.dumps(results[:10], ensure_ascii=False)
 
@@ -294,7 +293,14 @@ def local_file_qa(filename_prefix: str) -> str:
     Returns:
         The text content of the matching file.
     """
-    return _get_local_qa().query(filename_prefix)
+    result = _get_local_qa().query(filename_prefix)
+    # Detect "not found" error messages and return structured no_results
+    if result.startswith("No files found") or result.startswith("Error"):
+        return json.dumps({
+            "status": "no_results",
+            "message": result
+        }, ensure_ascii=False)
+    return result
 
 
 @tool
