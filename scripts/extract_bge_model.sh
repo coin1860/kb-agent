@@ -11,13 +11,16 @@ mkdir -p "${TARGET_DIR}"
 
 echo "Assembling and extracting the model parts..."
 
-# Concatenate all png chunks, decompress, and extract
-cat "${SOURCE_DIR}"/bge_part_*.png | xz -d | tar -x -C "${TARGET_DIR}"
+# Concatenate all png chunks, decompress with tar (gzip), and extract
+cat "${SOURCE_DIR}"/bge_part_*.png > "${TARGET_DIR}/models.tar.gz"
+tar -xzf "${TARGET_DIR}/models.tar.gz" -C "${TARGET_DIR}"
+tar_status=$?
+rm -f "${TARGET_DIR}/models.tar.gz"
 
-if [ $? -eq 0 ]; then
-    echo "Extraction successful! The model is restored to: ${TARGET_DIR}/bge-small-zh-v1.5"
+if [ $tar_status -eq 0 ]; then
+    echo "Extraction successful! The models are restored to: ${TARGET_DIR}"
     echo "You can now safely delete the ${SOURCE_DIR} directory."
 else
-    echo "Error: Failed to extract the model."
+    echo "Error: Failed to extract the models."
     exit 1
 fi

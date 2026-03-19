@@ -25,6 +25,7 @@ from .nodes import (
     analyze_and_route_node,
     plan_node,
     tool_node,
+    rerank_node,
     grade_evidence_node,
     synthesize_node
 )
@@ -72,6 +73,7 @@ def build_graph() -> StateGraph:
     graph.add_node("analyze_and_route", analyze_and_route_node)
     graph.add_node("plan", plan_node)
     graph.add_node("tool_exec", tool_node)
+    graph.add_node("rerank_node", rerank_node)
     graph.add_node("grade_evidence", grade_evidence_node)
     graph.add_node("synthesize", synthesize_node)
 
@@ -79,7 +81,8 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("analyze_and_route")
     graph.add_conditional_edges("analyze_and_route", _route_after_router)
     graph.add_edge("plan", "tool_exec")
-    graph.add_edge("tool_exec", "grade_evidence")
+    graph.add_edge("tool_exec", "rerank_node")
+    graph.add_edge("rerank_node", "grade_evidence")
     graph.add_conditional_edges("grade_evidence", _route_after_grade)
     graph.add_edge("synthesize", END)
 

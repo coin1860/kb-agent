@@ -17,8 +17,9 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 
 from kb_agent.engine import Engine
-import kb_agent.config as config
 from kb_agent.config import load_settings
+from kb_agent import config
+from kb_agent.tools.reranker import reranker_client
 
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 
@@ -242,6 +243,8 @@ class SettingsDetailScreen(ModalScreen[bool]):
         threshold = str(s.vector_score_threshold) if s and s.vector_score_threshold is not None else "0.5"
         chunk_max = str(s.chunk_max_chars) if s and s.chunk_max_chars is not None else "800"
         chunk_overlap = str(s.chunk_overlap_chars) if s and s.chunk_overlap_chars is not None else "200"
+        use_reranker = str(s.use_reranker) if s and s.use_reranker is not None else "False"
+        reranker_path = str(s.reranker_model_path) if s and s.reranker_model_path else ""
 
         yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
         yield Input(placeholder="1", value=max_iter, id="max_iterations", classes="settings-input")
@@ -251,6 +254,10 @@ class SettingsDetailScreen(ModalScreen[bool]):
         yield Input(placeholder="800", value=chunk_max, id="chunk_max_chars", classes="settings-input")
         yield Label("Chunk Overlap Chars", classes="settings-label", id="lbl-chunk-overlap")
         yield Input(placeholder="200", value=chunk_overlap, id="chunk_overlap_chars", classes="settings-input")
+        yield Label("Use Cross-Encoder Reranker", classes="settings-label", id="lbl-use-reranker")
+        yield Input(placeholder="True / False", value=use_reranker, id="use_reranker", classes="settings-input")
+        yield Label("Reranker Model Path", classes="settings-label", id="lbl-reranker-path")
+        yield Input(placeholder="models/bge-reranker-v2-m3-Q4_K_M.gguf", value=reranker_path, id="reranker_model_path", classes="settings-input")
 
     def _compose_atlassian(self):
         s = config.settings
@@ -323,6 +330,9 @@ class SettingsDetailScreen(ModalScreen[bool]):
             threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.5"
             chunk_max_raw = self.query_one("#chunk_max_chars").value.strip() or "800"
             chunk_overlap_raw = self.query_one("#chunk_overlap_chars").value.strip() or "200"
+            use_reranker_raw = self.query_one("#use_reranker").value.strip().lower()
+            use_reranker = use_reranker_raw in ("true", "1", "yes", "t", "y")
+            reranker_path = self.query_one("#reranker_model_path").value.strip()
             try:
                 max_iter = max(1, min(5, int(max_iter_raw)))
             except ValueError:
@@ -344,8 +354,14 @@ class SettingsDetailScreen(ModalScreen[bool]):
                 "vector_score_threshold": threshold,
                 "chunk_max_chars": chunk_max,
                 "chunk_overlap_chars": chunk_overlap,
+                "use_reranker": use_reranker,
+                "reranker_model_path": reranker_path or None,
             }
             os.environ["KB_AGENT_MAX_ITERATIONS"] = str(max_iter)
+
+            was_reranker_enabled = config.settings.use_reranker if config.settings else False
+            if use_reranker and not was_reranker_enabled:
+                self.notify("Reranker enabled. Please restart kb-agent to load the model.", severity="warning", timeout=6.0)
 
         elif self.category == "atlassian":
             jira_url = self.query_one("#jira_url").value.strip()
@@ -951,7 +967,7 @@ class KBAgentApp(App):
     def on_copy_pressed(self):
         self.action_copy_last_response()
 
-    def on_mount(self):
+    async def on_mount(self):
         log = self.query_one("#chat-log", RichLog)
 
         # Show logo + welcome on startup (no /help to keep it clean)
@@ -969,6 +985,7 @@ class KBAgentApp(App):
             try:
                 self.engine = Engine()
                 log.write("[green]● Engine ready[/green]")
+                await reranker_client.initialize()
             except Exception as e:
                 log.write(f"[yellow]⚠ Engine init: {e}[/yellow]")
                 log.write("[dim]Use /settings to configure[/dim]")
@@ -1461,48 +1478,16 @@ class KBAgentApp(App):
         md_text = self.last_response
         
         try:
-            from markdown_it import MarkdownIt
-            md_parser = MarkdownIt("commonmark", {"breaks": False, "html": True})
-            html_body = md_parser.render(md_text)
+            # Direct copy as plain text (Markdown)
+            subprocess.run(['pbcopy'], input=md_text.encode('utf-8'), check=True)
+            self.notify("Response copied as Markdown to clipboard!")
+            return
             
-            # Wrappers to make it look good in emails
-            html_wrapper = f"""
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <style>
-                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; }}
-                h1, h2, h3, h4, h5, h6 {{ font-size: 14px; font-weight: bold; margin: 0.5em 0 0.3em 0; }}
-                p {{ margin: 0 0 0.5em 0; }}
-                ul, ol {{ margin: 0 0 0.5em 0; padding-left: 20px; }}
-                li {{ margin: 0; }}
-                code {{ font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; background-color: #f6f8fa; padding: 0.2em 0.4em; border-radius: 6px; font-size: 85%; }}
-                pre {{ background-color: #f6f8fa; padding: 16px; border-radius: 6px; overflow: auto; }}
-                pre code {{ background-color: transparent; padding: 0; }}
-            </style>
-            </head>
-            <body>
-            {html_body}
-            </body>
-            </html>
-            """
             
-            # Run through textutil to convert HTML to RTF and pipe to pbcopy
-            p1 = subprocess.Popen(["textutil", "-stdin", "-format", "html", "-convert", "rtf", "-stdout"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-            p2 = subprocess.Popen(["pbcopy"], stdin=p1.stdout)
             
-            stdout, stderr = p1.communicate(input=html_wrapper.encode("utf-8"))
-            p1.stdout.close()
-            p2.communicate()
 
-            self.notify("Response copied as Rich Text (RTF) to clipboard!")
         except Exception as e:
-            # Fallback to plain markdown text
-            try:
-                subprocess.run(['pbcopy'], input=md_text.encode('utf-8'), check=True)
-                self.notify("Response copied as Plain Text to clipboard!")
-            except Exception as inner_e:
-                self.notify(f"Copy failed: {e}", severity="error")
+            self.notify(f"Copy failed: {e}", severity="error")
 
     def action_select_all_input(self):
         """Select all text in the TextArea input."""

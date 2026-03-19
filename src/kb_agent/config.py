@@ -29,6 +29,8 @@ class Settings(BaseModel):
     chunk_max_chars: Optional[int] = Field(800, description="Max characters per chunk for knowledge document splitting")
     chunk_overlap_chars: Optional[int] = Field(200, description="Character overlap between consecutive chunks")
     debug_mode: Optional[bool] = Field(False, description="Enable debug mode to show detailed chunks in the TUI")
+    use_reranker: Optional[bool] = Field(False, description="Enable cross-encoder reranking for context chunks")
+    reranker_model_path: Optional[Path] = Field(Path('models/bge-reranker-v2-m3-Q4_K_M.gguf'), description="Path to local GGUF reranker model")
 
     # Paths
     data_folder: Optional[Path] = Field(None, description="Base directory for kb-agent data")
@@ -194,6 +196,10 @@ def update_setting(key: str, value: Any):
     
     # Reload global instance
     load_settings()
+
+def get_project_root() -> Path:
+    """Return the absolute path to the project root directory."""
+    return Path(__file__).parent.parent.parent
 
 # Initial load attempt
 load_settings()

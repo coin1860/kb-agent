@@ -25,21 +25,17 @@ class ONNXEmbeddingFunction(embedding_functions.EmbeddingFunction):
             raise FileNotFoundError(f"Model ({model_path}) or Tokenizer ({tokenizer_path}) not found in {model_dir}")
         
         # Load the ONNX model
-        self.session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = 4
+        self.session = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
+        
+        self.valid_input_names = [i.name for i in self.session.get_inputs()]
         
         # Load the tokenizer
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
+        self.tokenizer.enable_truncation(max_length=8192)
 
-    def mean_pooling(self, token_embeddings, attention_mask):
-        import numpy as np
-        # token_embeddings: [batch_size, seq_length, hidden_size]
-        # attention_mask: [batch_size, seq_length]
-        input_mask_expanded = np.expand_dims(attention_mask, -1)
-        input_mask_expanded = np.broadcast_to(input_mask_expanded, token_embeddings.shape).astype(float)
-        
-        sum_embeddings = np.sum(token_embeddings * input_mask_expanded, axis=1)
-        sum_mask = np.clip(np.sum(input_mask_expanded, axis=1), a_min=1e-9, a_max=None)
-        return sum_embeddings / sum_mask
+
         
     def __call__(self, input: List[str]) -> List[List[float]]:
         import numpy as np
@@ -73,11 +69,13 @@ class ONNXEmbeddingFunction(embedding_functions.EmbeddingFunction):
                 batch_attention_mask[i].extend([0] * pad_len)
                 batch_token_type_ids[i].extend([0] * pad_len)
         
-        ort_inputs = {
-            "input_ids": np.array(batch_input_ids, dtype=np.int64),
-            "attention_mask": np.array(batch_attention_mask, dtype=np.int64),
-            "token_type_ids": np.array(batch_token_type_ids, dtype=np.int64)
-        }
+        ort_inputs = {}
+        if "input_ids" in self.valid_input_names:
+            ort_inputs["input_ids"] = np.array(batch_input_ids, dtype=np.int64)
+        if "attention_mask" in self.valid_input_names:
+            ort_inputs["attention_mask"] = np.array(batch_attention_mask, dtype=np.int64)
+        if "token_type_ids" in self.valid_input_names:
+            ort_inputs["token_type_ids"] = np.array(batch_token_type_ids, dtype=np.int64)
         
         # Run inference
         outputs = self.session.run(None, ort_inputs)
@@ -85,8 +83,8 @@ class ONNXEmbeddingFunction(embedding_functions.EmbeddingFunction):
         # outputs[0] is typically the sequence output
         token_embeddings = outputs[0]
         
-        # Perform mean pooling
-        sentence_embeddings = self.mean_pooling(token_embeddings, ort_inputs["attention_mask"])
+        # BGE-M3 uses CLS token pooling (the first token)
+        sentence_embeddings = token_embeddings[:, 0, :]
         
         # Normalize
         norms = np.linalg.norm(sentence_embeddings, axis=1, keepdims=True)
@@ -141,14 +139,17 @@ class VectorTool:
         if ef:
             try:
                 self.collection = self.client.get_collection(name=collection_name, embedding_function=ef)
-            except Exception:
+            except Exception as e:
+                print(f"Failed to get collection '{collection_name}'. Attempting to create...")
                 try:
-                    self.collection = self.client.create_collection(name=collection_name, embedding_function=ef)
-                except Exception:
+                    self.collection = self.client.create_collection(name=collection_name, embedding_function=ef, metadata={"hnsw:space": "cosine"})
+                except Exception as e:
+                    print(f"Failed to create collection '{collection_name}': {e}")
+                    print("This is likely due to a dimension or metric mismatch from previous runs. Please delete the .chroma folder and restart the system.")
                     # Fallback if there's a race condition or mismatch
-                    self.collection = self.client.get_or_create_collection(name=collection_name)
+                    self.collection = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
         else:
-            self.collection = self.client.get_or_create_collection(name=collection_name)
+            self.collection = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
 
     def add_documents(self, documents: List[str], metadatas: List[Dict[str, Any]], ids: List[str]):
         """

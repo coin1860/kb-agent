@@ -835,6 +835,51 @@ def tool_node(state: AgentState) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Node: RERANK EVIDENCE
+# ---------------------------------------------------------------------------
+
+def rerank_node(state: AgentState) -> dict[str, Any]:
+    """Rerank retrieved evidence using a cross-encoder before grading."""
+    from ..config import settings
+    from ..tools.reranker import reranker_client
+    import re
+    
+    if not settings or not settings.use_reranker:
+        return {"context": state.get("context", [])}
+        
+    context_str = state.get("context", [])
+    if not context_str:
+        return {"context": []}
+
+    _emit(state, "📊", f"Reranking {len(context_str)} chunks with cross-encoder...")
+    
+    # Map context strings to chunk dictionaries for reranker input
+    chunks = []
+    for c in context_str:
+        # Strip out the [SOURCE:...] prefix for the content to be scored, to avoid confounding the model
+        content = c
+        match = re.search(r'^\[SOURCE:(.+?)\]\s*(.*)', c, flags=re.DOTALL)
+        if match:
+            content = match.group(2)
+        chunks.append({"content": content, "original_str": c})
+    
+    query = state.get("resolved_query", state.get("query", ""))
+    
+    # We want to return the top N chunks.
+    top_n = getattr(settings, "rerank_top_n", 4) 
+    
+    # Use the synchronous rerank method to avoid event loop issues when LangGraph invoke() is called synchronously
+    reranked = reranker_client.rerank_sync(query, chunks, top_n=top_n)
+    
+    # Reconstruct the context from the original strings of the top chunks
+    new_context = [c["original_str"] for c in reranked]
+    
+    _emit(state, "🎯", f"Reranked to top {len(new_context)} chunks.")
+    
+    return {"context": new_context}
+
+
+# ---------------------------------------------------------------------------
 # Node: GRADE EVIDENCE (CRAG)
 # ---------------------------------------------------------------------------
 

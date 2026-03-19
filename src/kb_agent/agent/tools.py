@@ -146,13 +146,20 @@ def vector_search(query: str) -> str:
     Returns:
         JSON array of matches with id, content snippet, metadata, and score.
     """
-    results = _get_vector().search(query, n_results=5)
+    from kb_agent.config import settings
+    
+    # If reranker is enabled, retrieve more chunks to give the reranker a wider pool
+    fetch_k = 20 if settings and settings.use_reranker else 5
+    
+    results = _get_vector().search(query, n_results=fetch_k)
     if not results:
         return json.dumps({
             "status": "no_results",
             "message": "No relevant documents found for query"
         }, ensure_ascii=False)
-    return json.dumps(results[:10], ensure_ascii=False)
+        
+    # Return all fetched results, rerank_node will filter them down if enabled
+    return json.dumps(results[:fetch_k], ensure_ascii=False)
 
 
 @tool
