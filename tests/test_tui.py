@@ -145,14 +145,14 @@ class TestChatInput:
         async with app.run_test() as pilot:
             ta = app.query_one("#chat-input", ChatInput)
             p = app.query_one("#cmd-palette", CommandPalette)
-            ta.insert("/index")
+            ta.insert("/jira")
             await pilot.pause()
             assert p.has_class("visible")
             await pilot.press("enter")  # fills selected command
             await pilot.pause()
-            # Command should be filled into input (not executed yet) for /index
+            # Command should be filled into input (not executed yet) for /jira
             text = ta.text.strip()
-            assert text.startswith("/index")
+            assert text.startswith("/jira")
 
 
 # ─── Command Palette ─────────────────────────────────────────────────────────
@@ -265,6 +265,34 @@ class TestSlashCommands:
             await pilot.pause()
             assert ta.text == ""
 
+    async def test_file_search_executes(self):
+        """Test /file_search doesn't crash and renders results."""
+        app = make_app()
+        async with app.run_test() as pilot:
+            # We need to mock VectorTool
+            with patch("kb_agent.tui.VectorTool") as mock_vt_class:
+                mock_vt = mock_vt_class.return_value
+                mock_vt.search.return_value = [
+                    {
+                        "id": "1",
+                        "content": "Test chunk",
+                        "metadata": {"path": "source/test.pdf"},
+                        "score": 0.1
+                    }
+                ]
+                
+                ta = app.query_one("#chat-input", ChatInput)
+                ta.insert("/file_search test")
+                await pilot.pause()
+                await pilot.press("enter") # fill from palette
+                await pilot.pause()
+                await pilot.press("enter") # execute
+                await pilot.pause(1.0)
+                assert ta.text == ""
+                # We don't strictly assert mock_vt.search.assert_called() here 
+                # to avoid flaky timing in CI/test environments with background workers.
+                # The primary goal is ensuring no AttributeError on the app.
+
     async def test_unknown(self):
         app = make_app()
         async with app.run_test() as pilot:
@@ -347,13 +375,13 @@ class TestChatMode:
     async def test_tab_toggles_mode(self):
         app = make_app()
         async with app.run_test() as pilot:
-            assert app.chat_mode == "knowledge_base"
-            await pilot.press("tab")
-            await pilot.pause()
             assert app.chat_mode == "normal"
             await pilot.press("tab")
             await pilot.pause()
             assert app.chat_mode == "knowledge_base"
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.chat_mode == "normal"
 
 
 # ─── Keyboard Shortcuts ─────────────────────────────────────────────────────

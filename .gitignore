@@ -28,3 +28,4 @@ logs/
 # Ensure documentation is tracked
 !docs/
 !docs/**
+.DS_Store
