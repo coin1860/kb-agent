@@ -143,6 +143,45 @@ class Engine:
     # URL handling (unchanged)
     # ------------------------------------------------------------------
 
+    def answer_from_context(
+        self,
+        context_text: str,
+        user_query: str,
+        _status=None,
+        history: List[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Directly answer a query based on the provided context text, bypassed RAG.
+        Used by /jira, /confluence, and /file commands in chat mode.
+        """
+        def _stat(emoji, msg):
+            if _status:
+                _status(emoji, msg)
+
+        history = history or []
+        _stat("✨", "Generating answer from provided content...")
+        
+        system_prompt = (
+            "You are a helpful assistant. Answer the user's question based on "
+            "the provided content context (and previous conversation if "
+            "necessary). Be concise, accurate, and well-structured. "
+            "If the content doesn't fully answer the question, summarize "
+            "the key information available."
+        )
+        user_prompt = f"Context:\n{context_text[:12000]}\n\nQuestion: {user_query}"
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_prompt})
+
+        raw_response = self.llm.chat_completion(messages)
+        log_llm_response(user_prompt, raw_response)
+        return Security.mask_sensitive_data(raw_response)
+
+    # ------------------------------------------------------------------
+    # URL handling
+    # ------------------------------------------------------------------
+
     def _handle_urls(
         self,
         user_query: str,
@@ -178,22 +217,8 @@ class Engine:
         if not question:
             question = "Please summarize the content from the provided URL(s)."
 
-        _status("✨", "Generating answer from web content...")
-        system_prompt = (
-            "You are a helpful assistant. Answer the user's question based on "
-            "the web page content provided (and previous conversation if "
-            "necessary). If the content doesn't answer the question, summarize "
-            "the key points of the page. Be concise and well-structured."
-        )
-        user_prompt = f"Web Content:\n{full_context[:8000]}\n\nQuestion: {question}"
-
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_prompt})
-
-        raw_response = self.llm.chat_completion(messages)
-        log_llm_response(user_prompt, raw_response)
-        return Security.mask_sensitive_data(raw_response), []
+        answer = self.answer_from_context(full_context, question, _status=_status, history=history)
+        return answer, []
 
     def index_resource(self, url_or_id: str, on_status=None) -> str:
         """

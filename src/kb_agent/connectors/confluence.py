@@ -68,6 +68,10 @@ class ConfluenceConnector(BaseConnector):
 
     def _fetch_page(self, page_id: str) -> List[Dict[str, Any]]:
         """Fetch a single Confluence page by its numeric ID."""
+        if not self.confluence:
+            return [{"id": page_id, "title": "Confluence not configured",
+                     "content": "Confluence client is not initialized.",
+                     "metadata": {"source": "confluence", "error": True}}]
         try:
             page_data = self.confluence.get_page_by_id(
                 page_id,
@@ -86,6 +90,11 @@ class ConfluenceConnector(BaseConnector):
             return [{"id": page_id, "title": "Confluence API error",
                      "content": f"Failed to fetch page {page_id}: {e}",
                      "metadata": {"source": "confluence", "error": True}}]
+
+    def get_page(self, page_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single Confluence page by its numeric ID and return formatted dict (including errors)."""
+        results = self._fetch_page(page_id)
+        return results[0] if results else None
 
     def _search_cql(self, text: str) -> List[Dict[str, Any]]:
         """Search Confluence using CQL text search."""

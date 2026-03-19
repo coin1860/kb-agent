@@ -56,3 +56,7 @@ class LocalFileQATool:
             return f"File Content for '{target_file.name}':\n\n{content}"
         except Exception as e:
             return f"Error reading file {target_file.name}: {str(e)}"
+
+    def run(self, search_term: str) -> str:
+        """Alias for query to match tool interface."""
+        return self.query(search_term)

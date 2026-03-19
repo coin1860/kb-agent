@@ -20,10 +20,14 @@ from kb_agent.engine import Engine
 from kb_agent.config import load_settings
 from kb_agent import config
 from kb_agent.tools.reranker import reranker_client
+from kb_agent.connectors.jira import JiraConnector
+from kb_agent.connectors.confluence import ConfluenceConnector
+from kb_agent.tools.local_file_qa import LocalFileQATool
+from kb_agent.tools.vector_tool import VectorTool
 
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 
-SLASH_COMMANDS = [
+RAG_COMMANDS = [
     ("/clear", "Clear chat history"),
     ("/file_search", "Search files in the knowledge base"),
     ("/help", "Show available commands"),
@@ -31,8 +35,21 @@ SLASH_COMMANDS = [
     ("/quit", "Exit the application"),
     ("/settings", "Open settings dialog"),
     ("/sync_confluence", "Sync Confluence page tree"),
-    ("/web_engine", "Switch web engine (markdownify / crawl4ai)"),
 ]
+
+CHAT_COMMANDS = [
+    ("/clear", "Clear chat history"),
+    ("/confluence", "Fetch Confluence page and chat: /confluence <id> [query]"),
+    ("/file", "Chat with local file: /file <name> [query]"),
+    ("/file_search", "Search files in the knowledge base"),
+    ("/help", "Show available commands"),
+    ("/jira", "Fetch Jira issue and chat: /jira <id> [query]"),
+    ("/quit", "Exit the application"),
+    ("/settings", "Open settings dialog"),
+]
+
+# For backward compatibility and initial palette filter before app is ready
+SLASH_COMMANDS = CHAT_COMMANDS
 
 
 # ─── Settings Modal ─────────────────────────────────────────────────────────
@@ -390,9 +407,9 @@ class SettingsDetailScreen(ModalScreen[bool]):
             from pydantic import SecretStr
             new_settings_data = config.settings.model_dump(mode='json')
             # model_dump masks SecretStr as '**********'; unpack to real values
-            for field_name, value in config.settings:
-                if isinstance(value, SecretStr):
-                    new_settings_data[field_name] = value.get_secret_value()
+            for field_name, value in config.settings.model_dump().items():
+                if isinstance(getattr(config.settings, field_name), SecretStr):
+                    new_settings_data[field_name] = getattr(config.settings, field_name).get_secret_value()
         new_settings_data.update(updates)
 
         try:
@@ -623,8 +640,13 @@ class CommandPalette(Container):
 
     def filter_commands(self, text: str):
         prefix = text.lstrip("/").lower()
+        
+        # Determine which command list to use based on app mode
+        mode = getattr(self.app, "chat_mode", "normal")
+        cmd_list = CHAT_COMMANDS if mode == "normal" else RAG_COMMANDS
+        
         self._filtered = [
-            (cmd, desc) for cmd, desc in SLASH_COMMANDS
+            (cmd, desc) for cmd, desc in cmd_list
             if cmd[1:].startswith(prefix)
         ]
         self.highlighted_index = 0
@@ -773,20 +795,24 @@ HELP_TEXT = """\
 [bold cyan]Commands:[/bold cyan]
   [bold yellow]/help[/bold yellow]          Show this message
   [bold yellow]/settings[/bold yellow]      Configure API key, model & max iterations
-  [bold yellow]/web_engine[/bold yellow]    Switch web engine (markdownify / crawl4ai)
+  [bold yellow]/settings web_engine[/bold yellow] Switch web engine (markdownify / crawl4ai)
   [bold yellow]/file_search[/bold yellow]   Search files in the knowledge base
   [bold yellow]/clear[/bold yellow]         Clear chat
   [bold yellow]/quit[/bold yellow]          Exit
 
+[bold cyan]Chat Mode Commands:[/bold cyan]
+  [bold yellow]/jira[/bold yellow] [dim]<id> [query][/dim] Fetch Jira issue and chat
+  [bold yellow]/confluence[/bold yellow] [dim]<id> [query][/dim] Fetch Confluence page and chat
+  [bold yellow]/file[/bold yellow] [dim]<name> [query][/dim] Chat with local file from index
+
+[bold cyan]KB RAG Mode Commands:[/bold cyan]
+  [bold yellow]/index[/bold yellow]         Index a URL, Jira ticket, or Confluence page
+  [bold yellow]/sync_confluence[/bold yellow] Sync Confluence page tree
+
 [bold cyan]Shortcuts:[/bold cyan]
   [bold]Ctrl+Q[/bold] Quit   [bold]Ctrl+L[/bold] Clear   [bold]Ctrl+S[/bold] Settings
+  [bold]Tab[/bold] Toggle mode
 
-[bold cyan]Features:[/bold cyan]
-  • Type a question to search the knowledge base
-  • Paste a [bold]URL[/bold] to fetch & analyze web page content
-  • Type [bold yellow]/[/bold yellow] for command autocomplete
-  • [bold]Enter[/bold] to send, [bold]Shift+Enter[/bold] for new line
-  • [bold]Tab[/bold] to toggle between RAG and Normal mode
 [dim]────────────────────────────────────────[/dim]
 """
 
@@ -798,6 +824,7 @@ class ChatInput(TextArea):
 
     class Submitted(Message):
         """Posted when user presses Enter (without Shift)."""
+
         def __init__(self, text: str):
             super().__init__()
             self.text = text
@@ -925,7 +952,7 @@ class KBAgentApp(App):
     """
 
     engine = None
-    chat_mode: reactive[str] = reactive("knowledge_base")
+    chat_mode: reactive[str] = reactive("normal")
     last_response: reactive[str] = reactive("")
     _suppress_palette = 0
     chat_history: list = []
@@ -1017,7 +1044,7 @@ class KBAgentApp(App):
         self.query_one("#chat-input", ChatInput).focus()
 
     def _refresh_status(self, state: str, detail: str = ""):
-        mode = getattr(self, "chat_mode", "knowledge_base")
+        mode = getattr(self, "chat_mode", "normal")
         self.query_one("#status-bar", StatusBar).set_status(state, detail, mode)
 
     def _ts(self) -> str:
@@ -1049,11 +1076,13 @@ class KBAgentApp(App):
             selected = palette.get_selected()
             palette.hide()
             if selected:
-                if selected in ("/settings", "/web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
+                # If it's a "simple" slash command, execute immediately
+                if selected in ("/settings", "/settings web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
                     ta.clear()
                     self._suppress_palette = 2
                     self._exec_slash(selected)
                 else:
+                    # Otherwise, insert command and let user type params
                     self._suppress_palette = 2  # suppress clear() + insert() events
                     ta.clear()
                     ta.insert(selected + " ")
@@ -1101,7 +1130,7 @@ class KBAgentApp(App):
                 if selected:
                     ta = self.query_one("#chat-input", ChatInput)
                     palette.hide()
-                    if selected in ("/settings", "/web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
+                    if selected in ("/settings", "/settings web_engine", "/clear", "/quit", "/sync_confluence", "/help"):
                         ta.clear()
                         self._suppress_palette = 2
                         self._exec_slash(selected)
@@ -1136,12 +1165,16 @@ class KBAgentApp(App):
         
         if cmd == "/help":
             log.write(HELP_TEXT)
-        elif cmd == "/settings":
-            self.action_open_settings()
+        elif cmd in ("/settings", "/setting"):
+            if len(parts) > 1 and parts[1].strip().lower() == "web_engine":
+                self.push_screen(WebEngineScreen())
+            else:
+                self.action_open_settings()
         elif cmd == "/clear":
             self.action_clear_chat()
         elif cmd == "/web_engine":
-            self.push_screen(WebEngineScreen())
+             log.write("[dim]Tip: /web_engine has been moved to /settings web_engine[/dim]")
+             self.push_screen(WebEngineScreen())
         elif cmd == "/file_search":
             if len(parts) < 2:
                 log.write("[yellow]Usage: /file_search <query>[/yellow]")
@@ -1154,6 +1187,30 @@ class KBAgentApp(App):
                 self._run_index_command(parts[1])
         elif cmd == "/sync_confluence":
             self.push_screen(ConfluenceSyncScreen(), self._run_confluence_sync)
+        elif cmd == "/jira":
+            if len(parts) < 2:
+                log.write("[yellow]Usage: /jira <id> [query][/yellow]")
+            else:
+                p2 = parts[1].split(maxsplit=1)
+                jira_id = p2[0]
+                query = p2[1] if len(p2) > 1 else "Please summarize this Jira issue."
+                self._run_jira_command(jira_id, query)
+        elif cmd == "/confluence":
+            if len(parts) < 2:
+                log.write("[yellow]Usage: /confluence <id> [query][/yellow]")
+            else:
+                p2 = parts[1].split(maxsplit=1)
+                page_id = p2[0]
+                query = p2[1] if len(p2) > 1 else "Please summarize this Confluence page."
+                self._run_confluence_command(page_id, query)
+        elif cmd == "/file":
+            if len(parts) < 2:
+                log.write("[yellow]Usage: /file <filename> [query][/yellow]")
+            else:
+                p2 = parts[1].split(maxsplit=1)
+                fname = p2[0]
+                query = p2[1] if len(p2) > 1 else "Please summarize this file."
+                self._run_file_command(fname, query)
         elif cmd == "/quit":
             self.exit()
         else:
@@ -1164,73 +1221,93 @@ class KBAgentApp(App):
             self._run_confluence_sync_worker(result["page_id"], result["depth"])
 
     @work(thread=True, exclusive=True)
-    def _run_confluence_sync_worker(self, page_id: str, depth: int):
+    def _run_jira_command(self, jira_id: str, query: str):
         log = self.query_one("#chat-log", RichLog)
-
-        self.call_from_thread(self._refresh_status, "thinking", f"Syncing Confluence (Page {page_id}, Depth {depth})...")
-        self.call_from_thread(log.write, "")
-        self.call_from_thread(log.write, f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]")
-        self.call_from_thread(log.write, f"  [dim]Starting Confluence sync for Root ID {page_id} up to depth {depth}...[/dim]")
-
-        from kb_agent.connectors.confluence import ConfluenceConnector
-        import re
-
+        self.call_from_thread(self._refresh_status, "thinking", f"Fetching Jira {jira_id}...")
+        self.call_from_thread(log.write, f"\n  [dim]{self._ts()}[/dim]  [bold yellow]/jira {jira_id}[/bold yellow]")
+        
         try:
-            connector = ConfluenceConnector()
+            if not self.engine:
+                self.engine = Engine()
 
-            def progress_cb(count, title):
-                self.call_from_thread(log.write, f"  [dim]✓ [{count}] Fetched & Saved: {title}[/dim]")
+            connector = JiraConnector()
+            issue = connector.get_issue(jira_id)
+            if not issue:
+                self.call_from_thread(log.write, f"[red]✗ Jira issue {jira_id} not found.[/red]")
+                return
 
-            output_dir = Path(config.settings.data_folder) / "source" / "confluence" if config.settings and config.settings.data_folder else Path("source/confluence")
-            output_dir.mkdir(parents=True, exist_ok=True)
+            if issue.get("metadata", {}).get("error"):
+                self.call_from_thread(log.write, f"[red]✗ Jira error: {issue['content']}[/red]")
+                return
 
-            saved_count = 0
-            for page in connector.crawl_tree(page_id, max_depth=depth, on_progress=progress_cb):
-                space = page["metadata"].get("space", "UNKNOWN")
-                p_id = page["id"]
-                title = page["title"]
-                safe_title = re.sub(r'[^\w\-]', '_', title)
-                filename = f"{space}_{p_id}_{safe_title}.md"
-
-                filepath = output_dir / filename
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(page["content"])
-                saved_count += 1
-
-            msg = f"✓ Sync complete! Saved {saved_count} pages to `source/confluence/`\n\nRun `/index` or `kb-agent index` to update the search index."
-            self.call_from_thread(log.write, Padding(Markdown(msg), (0, 0, 0, 2)))
-
+            context = f"Jira Issue: {issue['key']}\nSummary: {issue['title']}\nStatus: {issue['status']}\nDescription: {issue['content']}"
+            answer = self.engine.answer_from_context(context, query, history=self.chat_history)
+            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            self.chat_history.append({"role": "user", "content": f"/jira {jira_id} {query}"})
+            self.chat_history.append({"role": "assistant", "content": answer})
         except Exception as e:
-            self.call_from_thread(log.write, f"\n[red]✗ Sync failed: {e}[/red]")
+            self.call_from_thread(log.write, f"[red]✗ Jira error: {e}[/red]")
         finally:
             self.call_from_thread(self._refresh_status, "idle")
 
-    # ─── Query Worker ─────────────────────────────────────────────────────
-
     @work(thread=True, exclusive=True)
-    def _run_index_command(self, target: str):
-        """Asynchronously trigger the engine's index_resource command."""
+    def _run_confluence_command(self, page_id: str, query: str):
         log = self.query_one("#chat-log", RichLog)
-
-        def on_status(emoji, msg):
-            self.call_from_thread(log.write, f"  [dim]{emoji} {msg}[/dim]")
-
-        self.call_from_thread(self._refresh_status, "thinking", "Indexing...")
-        self.call_from_thread(log.write, "")
-        self.call_from_thread(log.write, f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]")
+        self.call_from_thread(self._refresh_status, "thinking", f"Fetching Confluence {page_id}...")
+        self.call_from_thread(log.write, f"\n  [dim]{self._ts()}[/dim]  [bold yellow]/confluence {page_id}[/bold yellow]")
         
         try:
-            # engine.index_resource will handle routing to Web/Jira/Confluence 
-            # and writing progress iteratively using on_status
-            result = self.engine.index_resource(target, on_status=on_status)
-            
-            # Write final output (which might be success or failure string from engine)
-            self.call_from_thread(log.write, "")
-            self.call_from_thread(log.write, Padding(result, (0, 0, 0, 2)))
+            if not self.engine:
+                self.engine = Engine()
+
+            connector = ConfluenceConnector()
+            page = connector.get_page(page_id)
+            if not page:
+                self.call_from_thread(log.write, f"[red]✗ Confluence page {page_id} not found.[/red]")
+                return
+
+            if page.get("metadata", {}).get("error"):
+                self.call_from_thread(log.write, f"[red]✗ Confluence error: {page['content']}[/red]")
+                return
+
+            context = f"Confluence Page: {page['title']}\nID: {page['id']}\n\n{page['content']}"
+            answer = self.engine.answer_from_context(context, query, history=self.chat_history)
+            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            self.chat_history.append({"role": "user", "content": f"/confluence {page_id} {query}"})
+            self.chat_history.append({"role": "assistant", "content": answer})
         except Exception as e:
-            self.call_from_thread(log.write, f"\n[red]✗ Error indexing {target}: {e}[/red]")
+            self.call_from_thread(log.write, f"[red]✗ Confluence error: {e}[/red]")
         finally:
-            self.call_from_thread(log.write, "[dim]────────────────────────────────────────[/dim]")
+            self.call_from_thread(self._refresh_status, "idle")
+
+    @work(thread=True, exclusive=True)
+    def _run_file_command(self, filename: str, query: str):
+        log = self.query_one("#chat-log", RichLog)
+        self.call_from_thread(self._refresh_status, "thinking", f"Reading file {filename}...")
+        self.call_from_thread(log.write, f"\n  [dim]{self._ts()}[/dim]  [bold yellow]/file {filename}[/bold yellow]")
+        
+        try:
+            if not self.engine:
+                self.engine = Engine()
+
+            tool = LocalFileQATool()
+            # LocalFileQATool.run takes search_query, but we want the raw content of a file.
+            # However, looking at local_file_qa.py, it seems it handles file lookup.
+            # If it's a specific file, we might need a better way if LocalFileQATool only does fuzzy search.
+            # But according to user request, it should read from data folder index directory.
+            content = tool.run(filename) # Assuming tool.run(filename) returns the file content or a summary
+            
+            if not content or "not found" in content.lower():
+                self.call_from_thread(log.write, f"[red]✗ File {filename} not found in index directory.[/red]")
+                return
+
+            answer = self.engine.answer_from_context(content, query, history=self.chat_history)
+            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            self.chat_history.append({"role": "user", "content": f"/file {filename} {query}"})
+            self.chat_history.append({"role": "assistant", "content": answer})
+        except Exception as e:
+            self.call_from_thread(log.write, f"[red]✗ File error: {e}[/red]")
+        finally:
             self.call_from_thread(self._refresh_status, "idle")
 
     @work(thread=True, exclusive=True)

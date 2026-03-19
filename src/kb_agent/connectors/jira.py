@@ -69,6 +69,10 @@ class JiraConnector(BaseConnector):
 
     def _fetch_issue(self, issue_key: str) -> List[Dict[str, Any]]:
         """Fetch a single Jira issue by key."""
+        if not self.jira:
+            return [{"id": issue_key, "title": "Jira not configured",
+                     "content": "Jira client is not initialized.",
+                     "metadata": {"source": "jira", "error": True}}]
         try:
             issue_data = self.jira.issue(issue_key, expand="renderedFields")
             if not issue_data:
@@ -83,6 +87,11 @@ class JiraConnector(BaseConnector):
             return [{"id": issue_key, "title": f"Jira API error",
                      "content": f"Failed to fetch {issue_key}: {e}",
                      "metadata": {"source": "jira", "error": True}}]
+
+    def get_issue(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single Jira issue by key and return formatted dict (including errors)."""
+        results = self._fetch_issue(issue_key)
+        return results[0] if results else None
 
     def _search_jql(self, jql: str) -> List[Dict[str, Any]]:
         """Search Jira using arbitrary JQL query."""
