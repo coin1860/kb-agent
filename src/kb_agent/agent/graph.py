@@ -27,30 +27,23 @@ from .nodes import (
     tool_node,
     rerank_node,
     grade_evidence_node,
+    reflect_node,
     synthesize_node
 )
 
 
-def _route_after_grade(state: AgentState) -> str:
-    """Conditional edge after grading evidence."""
-    # Default to 1 to match TUI and config expectations
-    max_iter = max(1, min(5, int(os.getenv("KB_AGENT_MAX_ITERATIONS", "1"))))
+def _route_after_reflect(state: AgentState) -> str:
+    """Conditional edge after reflect_node extraction."""
+    verdict = state.get("reflection_verdict", "sufficient")
     
-    action = state.get("grader_action", "GENERATE")
-    
-    if action == "GENERATE":
+    if verdict == "sufficient":
         return "synthesize"
-        
-    if state.get("iteration", 0) >= max_iter:
+    if verdict == "exhausted":
         return "synthesize"
-        
-    if action == "REFINE":
+    if verdict == "needs_precision":
         return "plan"
         
-    if action == "RE_RETRIEVE":
-        return "plan"
-        
-    return "synthesize" # Fallback
+    return "synthesize"
 
 
 def _route_after_tool_exec(state: AgentState) -> str:
@@ -75,6 +68,7 @@ def build_graph() -> StateGraph:
     graph.add_node("tool_exec", tool_node)
     graph.add_node("rerank_node", rerank_node)
     graph.add_node("grade_evidence", grade_evidence_node)
+    graph.add_node("reflect_node", reflect_node)
     graph.add_node("synthesize", synthesize_node)
 
     # Edges
@@ -83,7 +77,8 @@ def build_graph() -> StateGraph:
     graph.add_edge("plan", "tool_exec")
     graph.add_edge("tool_exec", "rerank_node")
     graph.add_edge("rerank_node", "grade_evidence")
-    graph.add_conditional_edges("grade_evidence", _route_after_grade)
+    graph.add_edge("grade_evidence", "reflect_node")
+    graph.add_conditional_edges("reflect_node", _route_after_reflect)
     graph.add_edge("synthesize", END)
 
     return graph

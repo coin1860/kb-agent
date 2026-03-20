@@ -1377,8 +1377,8 @@ class KBAgentApp(App):
                 f"  [dim]🧹 Deduplicated: {len(all_chunks)} → {len(unique_chunks)} chunks[/dim]",
             )
 
-            # 4. Sort by score ascending (L2 distance, lower = more relevant)
-            unique_chunks.sort(key=lambda x: x.get("score", float("inf")))
+            # 4. Sort by score descending (similarity, higher = more relevant)
+            unique_chunks.sort(key=lambda x: x.get("score", -float("inf")), reverse=True)
 
             # 5. Extract unique files, top 5
             seen_files = set()
@@ -1410,7 +1410,7 @@ class KBAgentApp(App):
                     continue
                 seen_files.add(fname)
 
-                score = c.get("score", float("inf"))
+                score = c.get("score", -1.0)
                 desc = c.get("content", "")[:80].replace("|", " ").replace("\n", " ").strip()
                 top_files.append((fname, index_link, score, desc))
                 if len(top_files) >= 5:
@@ -1426,7 +1426,7 @@ class KBAgentApp(App):
                 table.add_column("Desc", style="white")
 
                 for i, (fname, link, score, desc) in enumerate(top_files, 1):
-                    formatted_score = f"{score:.3f}" if score != float("inf") else "N/A"
+                    formatted_score = f"{score:.3f}" if score != -1.0 else "N/A"
                     # Use rich markup for the hyperlink
                     table.add_row(str(i), f"[link={link}]{fname}[/link]", formatted_score, desc)
                 
@@ -1503,7 +1503,7 @@ class KBAgentApp(App):
                     score = src.get('score')
                     
                     if score is not None:
-                        sim = max(1, min(99, int((1.0 - (score / 2.0)) * 100)))
+                        sim = max(1, min(99, int(score * 100)))
                         score_text = f" ({sim}%)"
                     else:
                         score_text = ""

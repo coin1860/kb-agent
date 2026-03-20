@@ -272,30 +272,54 @@ class TestSynthesizeNode:
 # ---------------------------------------------------------------------------
 
 class TestRouting:
-    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_generate(self):
-        from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "GENERATE", "iteration": 1}) == "synthesize"
+    def test_route_sufficient(self):
+        from kb_agent.agent.graph import _route_after_reflect
+        assert _route_after_reflect({"reflection_verdict": "sufficient"}) == "synthesize"
 
-    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_refine_under_limit(self):
-        from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "REFINE", "iteration": 1}) == "plan"
+    def test_route_needs_precision(self):
+        from kb_agent.agent.graph import _route_after_reflect
+        assert _route_after_reflect({"reflection_verdict": "needs_precision"}) == "plan"
         
-    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_reretrieve_under_limit(self):
-        from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 1}) == "plan"
+    def test_route_exhausted(self):
+        from kb_agent.agent.graph import _route_after_reflect
+        assert _route_after_reflect({"reflection_verdict": "exhausted"}) == "synthesize"
 
-    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_max_iterations(self):
-        from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "REFINE", "iteration": 3}) == "synthesize"
+    def test_route_fallback(self):
+        from kb_agent.agent.graph import _route_after_reflect
+        assert _route_after_reflect({}) == "synthesize"
 
-    @patch.dict(os.environ, {"KB_AGENT_MAX_ITERATIONS": "3"})
-    def test_route_exactly_at_limit(self):
-        from kb_agent.agent.graph import _route_after_grade
-        assert _route_after_grade({"grader_action": "RE_RETRIEVE", "iteration": 4}) == "synthesize"
+# ---------------------------------------------------------------------------
+# 5.5 Plan Node Task Queue Fast-Path
+# ---------------------------------------------------------------------------
+
+class TestPlanNodeFastPath:
+    def test_plan_executes_queue_bypassing_llm(self):
+        from kb_agent.agent.nodes import plan_node
+        
+        state = {
+            "query": "login",
+            "messages": [],
+            "context": ["some context"],
+            "iteration": 1,
+            "status_callback": _noop_status,
+            "task_queue": [
+                {"id": "jira:FSR-123", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}, "status": "pending"}
+            ],
+            "attempted_task_ids": []
+        }
+        
+        result = plan_node(state)
+        
+        # Verify it skipped LLM entirely (llm_call_count remains 0)
+        assert result.get("llm_call_count", 0) == 0
+        
+        # Verify it scheduled the tool
+        assert len(result["pending_tool_calls"]) == 1
+        assert result["pending_tool_calls"][0]["name"] == "jira_fetch"
+        assert result["pending_tool_calls"][0]["args"]["issue_key"] == "FSR-123"
+        
+        # Verify the tracking id was pushed
+        assert "jira:FSR-123" in result["attempted_task_ids"]
 
 
 # ---------------------------------------------------------------------------

@@ -24,12 +24,13 @@ class Settings(BaseModel):
     
     # Agent/RAG Configuration
     max_iterations: Optional[int] = Field(None, description="Max iterations for agent RAG loops")
-    vector_score_threshold: Optional[float] = Field(0.5, description="Distance threshold for vector search. Also fast-path threshold for vector search auto-approve.")
+    vector_score_threshold: Optional[float] = Field(0.3, description="Minimum similarity threshold for vector search. Also fast-path threshold for vector search auto-approve.")
     auto_approve_max_items: Optional[int] = Field(None, description="Fast-path threshold for few-context auto-approve")
     chunk_max_chars: Optional[int] = Field(800, description="Max characters per chunk for knowledge document splitting")
     chunk_overlap_chars: Optional[int] = Field(200, description="Character overlap between consecutive chunks")
     debug_mode: Optional[bool] = Field(False, description="Enable debug mode to show detailed chunks in the TUI")
     use_reranker: Optional[bool] = Field(False, description="Enable cross-encoder reranking for context chunks")
+    rerank_top_n: Optional[int] = Field(4, description="Number of results to keep after reranking")
     reranker_model_path: Optional[Path] = Field(Path('models/bge-reranker-v2-m3-Q4_K_M.gguf'), description="Path to local GGUF reranker model")
 
     # Paths

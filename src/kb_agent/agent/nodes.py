@@ -438,6 +438,34 @@ def plan_node(state: AgentState) -> dict[str, Any]:
             "llm_total_tokens": state.get("llm_total_tokens", 0),
         }
 
+    # --- REFLECTION REPLANNER FAST PATH ---
+    task_queue = state.get("task_queue", [])
+    pending_tasks = [t for t in task_queue if t.get("status") == "pending"]
+    if iteration > 0 and pending_tasks:
+        _emit(state, "🚀", f"Fast-path: Executing {len(pending_tasks)} precision tasks from queue.")
+        log_audit("agent_plan_fast_path", {"queued_tasks": [t["id"] for t in pending_tasks]})
+        
+        tool_calls = []
+        attempted_task_ids = state.get("attempted_task_ids", [])
+        for t in pending_tasks:
+            t["status"] = "processing"  # Mark as processing
+            if t["id"] not in attempted_task_ids:
+                attempted_task_ids.append(t["id"])
+            tool_calls.append({
+                "name": t["tool"],
+                "args": t["args"]
+            })
+            
+        return {
+            "pending_tool_calls": tool_calls,
+            "task_queue": task_queue,
+            "attempted_task_ids": attempted_task_ids,
+            "llm_call_count": state.get("llm_call_count", 0),
+            "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
+            "llm_completion_tokens": state.get("llm_completion_tokens", 0),
+            "llm_total_tokens": state.get("llm_total_tokens", 0),
+        }
+
     grader_action = state.get("grader_action")
     
     # Let the LLM planner handle retry actions (REFINE/RE_RETRIEVE)
@@ -1063,7 +1091,7 @@ def _extract_hints_from_context(context_items: list[str], existing_hints: list[s
                 hints.add(hint)
                 
         # 2. Jira ticket IDs
-        jira_matches = re.finditer(r'\b([A-Z]+-\d+)\b', item)
+        jira_matches = re.finditer(r'\b([a-zA-Z][a-zA-Z0-9]*-\d+)\b', item)
         for match in jira_matches:
             hints.add(match.group(1))
             
@@ -1075,6 +1103,107 @@ def _extract_hints_from_context(context_items: list[str], existing_hints: list[s
             hints.add(f"Confluence Page ID: {match.group(1)}")
             
     return list(hints)
+
+
+# ---------------------------------------------------------------------------
+# Node: REFLECT (Active Entity Extraction)
+# ---------------------------------------------------------------------------
+
+def reflect_node(state: AgentState) -> dict[str, Any]:
+    """Pure Regex node to extract structured task IDs from context and populate task_queue."""
+    import re
+    from ..config import settings
+    
+    _emit(state, "🕵️", "Reflecting on evidence to extract precise entity IDs...")
+    
+    context_str = "\n".join(state.get("context", []))
+    attempted_task_ids = state.get("attempted_task_ids", [])
+    discovered_entities = state.get("discovered_entities", [])
+    task_queue = state.get("task_queue", [])
+    knowledge_gaps = state.get("knowledge_gaps", [])
+    
+    JIRA_PATTERN = r'\b[a-zA-Z][a-zA-Z0-9]*-\d+\b'
+    CONFLUENCE_PATTERN = r'\b\d{9,}\b'
+    CONFLUENCE_CONTEXT_HINTS = ["confluence", "頁面", "page", "wiki", "查看", "ticket", "id", "issue", "doc"]
+    
+    candidates = []
+    
+    # Extract Jira IDs
+    for match in re.finditer(JIRA_PATTERN, context_str):
+        candidates.append({
+            "type": "jira",
+            "value": match.group(0),
+            "tool": "jira_fetch",
+            "args": {"issue_key": match.group(0)}
+        })
+        
+    # Extract Confluence IDs
+    for match in re.finditer(CONFLUENCE_PATTERN, context_str):
+        val = match.group(0)
+        # Check surrounding text for context
+        start = max(0, match.start() - 30)
+        end = min(len(context_str), match.end() + 30)
+        surrounding = context_str[start:end].lower()
+        
+        if any(hint.lower() in surrounding for hint in CONFLUENCE_CONTEXT_HINTS):
+            candidates.append({
+                "type": "confluence",
+                "value": val,
+                "tool": "confluence_fetch",
+                "args": {"page_id": val}
+            })
+
+    existing_values = [e.get("value") for e in discovered_entities]
+    new_entities = []
+    
+    for c in candidates:
+        task_id = f"{c['type']}:{c['value']}"
+        if task_id not in attempted_task_ids and c["value"] not in existing_values:
+            # It's a brand new entity we haven't processed
+            new_entities.append(c)
+            existing_values.append(c["value"])
+            discovered_entities.append({
+                "type": c["type"],
+                "value": c["value"]
+            })
+            task_queue.append({
+                "id": task_id,
+                "tool": c["tool"],
+                "args": c["args"],
+                "status": "pending"
+            })
+            _emit(state, "📌", f"Reflector found new precise task: {task_id}")
+
+    # Determine Verdict
+    grader_action = state.get("grader_action", "GENERATE")
+    max_iter = max(1, min(5, int(settings.auto_approve_max_items if settings and getattr(settings, "auto_approve_max_items", None) else 3)))
+    iteration = state.get("iteration", 0)
+
+    if grader_action == "GENERATE":
+        verdict = "sufficient"
+    elif new_entities or any(t.get("status") == "pending" for t in task_queue):
+        verdict = "needs_precision"
+    elif iteration >= max_iter:
+        verdict = "exhausted"
+        # Since we're exhausted and have no tasks left, log the gap
+        missing = [f"{t.split(':')[0]} ID {t.split(':')[1]} (not found or retrieval failed)" for t in attempted_task_ids]
+        if missing:
+             knowledge_gaps.append(f"Failed to fetch precise context for: {', '.join(missing)}")
+    else:
+        # We need more context but found no exact tasks
+        verdict = "needs_precision" # This will just route back to plan_node which will do vector_search
+
+    log_audit("reflect_node_result", {
+        "verdict": verdict,
+        "new_entities_count": len(new_entities)
+    })
+
+    return {
+        "discovered_entities": discovered_entities,
+        "task_queue": task_queue,
+        "reflection_verdict": verdict,
+        "knowledge_gaps": knowledge_gaps
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1231,6 +1360,12 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
         f"= **{state.get('llm_total_tokens', 0)} total**"
     )
     final_answer += stats_block
+
+    # Append Knowledge Gaps if present
+    knowledge_gaps = state.get("knowledge_gaps", [])
+    if knowledge_gaps:
+        gap_block = "\n\n---\n⚠️ **Knowledge Gaps Detected:**\n" + "\n".join(f"- {g}" for g in knowledge_gaps)
+        final_answer += gap_block
 
     return {
         "final_answer": final_answer,

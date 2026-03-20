@@ -191,7 +191,7 @@ class VectorTool:
         # Fallback to configured default if not provided
         if threshold is None:
             settings = config.settings
-            threshold = settings.vector_score_threshold if settings and settings.vector_score_threshold is not None else 0.5
+            threshold = settings.vector_score_threshold if settings and settings.vector_score_threshold is not None else 0.3
             
         raw_results = self.query(query_text, n_results=n_results)
         if not raw_results or not raw_results['ids']:
@@ -206,16 +206,22 @@ class VectorTool:
         for i, doc_id in enumerate(ids):
             distance = distances[i] if i < len(distances) else 0.0
             
-            # Filter by threshold (L2 distance: shorter is better, so discard if distance >= threshold)
-            # Default ChromaDB embedding space metric is l2
-            if threshold is not None and distance >= threshold:
+            # ChromaDB cosine space returns distance (0.0 = exact, 1.0 = orthogonal)
+            # Convert to similarity score (0.0 to 1.0, higher is better)
+            similarity = max(0.0, 1.0 - distance)
+            
+            # Filter by minimum similarity threshold, UNLESS we are using the reranker
+            # The reranker needs a wider recall pool and will do its own precision filtering
+            current_settings = config.settings
+            bypass_threshold = current_settings and getattr(current_settings, "use_reranker", False)
+            if threshold is not None and similarity < threshold and not bypass_threshold:
                 continue
                 
             processed_results.append({
                 "id": doc_id,
                 "content": documents[i] if i < len(documents) else "",
                 "metadata": metadatas[i] if i < len(metadatas) else {},
-                "score": distance
+                "score": similarity
             })
 
         return processed_results

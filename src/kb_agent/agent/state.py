@@ -72,6 +72,25 @@ class AgentState(TypedDict, total=False):
     sources: list[dict[str, Any]]
     """Structured list of sources cited in the final answer."""
 
+    # ── Reflection & Replanning ───────────────────────────────────────────
+    discovered_entities: list[dict[str, str]]
+    """
+    Regex extracted entities, persistent across rounds.
+    e.g., [{"type": "jira", "value": "FSR-123"}]
+    """
+
+    task_queue: list[dict[str, Any]]
+    """Pending precision tasks like jira_fetch. Consumed by plan_node."""
+
+    attempted_task_ids: list[str]
+    """Used to prevent infinite loops of identical entity fetching tasks."""
+
+    reflection_verdict: str
+    """Verdict output from reflect_node: 'sufficient', 'needs_precision', or 'exhausted'."""
+
+    knowledge_gaps: list[str]
+    """List of explicit missing items passed to synthesis when graph exhausts tool loop."""
+
     # ── TUI integration ───────────────────────────────────────────────────
     status_callback: Any
     """Optional callback ``(emoji: str, msg: str) -> None`` for TUI progress."""
