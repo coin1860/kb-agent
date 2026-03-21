@@ -47,27 +47,11 @@ def _emit(state: AgentState, emoji: str, msg: str):
         cb(emoji, msg)
 
 
-def _build_llm() -> ChatOpenAI:
-    """Construct a ChatOpenAI that points at the user-configured provider."""
-    settings = config.settings
-    if not settings:
-        raise ValueError("Settings not initialized.")
-
-    model_name = settings.llm_model
-    if model_name.startswith("groq-com/"):
-        model_name = model_name.removeprefix("groq-com/")
-    elif model_name.startswith("groq/"):
-        model_name = model_name.removeprefix("groq/")
-
-    api_key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
-
-    return ChatOpenAI(
-        api_key=api_key,
-        base_url=str(settings.llm_base_url),
-        model=model_name,
-        temperature=0.2,
-        timeout=60,
-    )
+def _build_llm(role: str = "base") -> ChatOpenAI:
+    """Construct or retrieve a ChatOpenAI client via LLMRouter."""
+    from kb_agent.llm_router import get_llm_router
+    router = get_llm_router()
+    return router.get(role)
 
 
 def _history_to_messages(history: list[dict[str, str]]) -> list:
@@ -1241,7 +1225,7 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
         "total_chars": sum(len(c) for c in context_items),
     })
 
-    llm = _build_llm()
+    llm = _build_llm(role="strong")
     
     routing_plan = state.get("routing_plan", {})
     complexity = routing_plan.get("complexity", "complex")

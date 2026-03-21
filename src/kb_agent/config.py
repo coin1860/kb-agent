@@ -2,7 +2,7 @@ import os
 import json
 from pathlib import Path
 from pydantic import BaseModel, Field, SecretStr, HttpUrl
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 CONFIG_DIR = Path.home() / ".kb-agent"
 CONFIG_FILE = CONFIG_DIR / "kb-agent.json"
@@ -12,8 +12,25 @@ LOCAL_ENV_FILE = Path(".env")
 # Removed hardcoded DEFAULTS as per user request.
 # The user's .env file or the TUI settings page will be the sole source of configuration truths.
 
+class LLMProvider(BaseModel):
+    name: str
+    base_url: HttpUrl
+    api_key: SecretStr
+    models: List[str]
+    timeout: Optional[int] = 60
+    max_retries: Optional[int] = 2
+
+class LLMRoles(BaseModel):
+    strong: str
+    base: str
+    fast: Optional[str] = None
+
 class Settings(BaseModel):
-    # LLM Configuration
+    # Multi-provider LLM Configuration
+    llm_providers: Optional[List[LLMProvider]] = Field(default_factory=list, description="Configured LLM providers")
+    llm_roles: Optional[LLMRoles] = Field(None, description="Role assignments for models")
+    
+    # Deprecated (but backward compatible)
     llm_api_key: Optional[SecretStr] = Field(None, description="API Key for the LLM provider")
     llm_base_url: Optional[HttpUrl] = Field(None, description="Base URL for the LLM API")
     llm_model: Optional[str] = Field(None, description="Model name to use for chat completion")
@@ -40,6 +57,12 @@ class Settings(BaseModel):
     archive_path: Optional[Path] = Field(None, description="Path to archive processed docs")
     audit_log_path: Optional[Path] = Field(None, description="Path to the audit log file")
 
+    # Agent Mode Paths
+    skills_path: Optional[Path] = Field(None, description="Path to custom agent skills")
+    output_path: Optional[Path] = Field(None, description="Path to agent execution outputs")
+    agent_tmp_path: Optional[Path] = Field(None, description="Path to agent temporary workspace")
+    sessions_path: Optional[Path] = Field(None, description="Path to agent session persistence")
+
     # Proxy
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
     https_proxy: Optional[HttpUrl] = Field(None, description="HTTPS Proxy URL")
@@ -63,6 +86,14 @@ class Settings(BaseModel):
                 self.index_path = self.data_folder / "index"
             if not self.archive_path:
                 self.archive_path = self.data_folder / "archive"
+            if not self.skills_path:
+                self.skills_path = self.data_folder / "skills"
+            if not self.output_path:
+                self.output_path = self.data_folder / "output"
+            if not self.agent_tmp_path:
+                self.agent_tmp_path = self.data_folder / "agent_tmp"
+            if not self.sessions_path:
+                self.sessions_path = self.data_folder / "sessions"
         else:
             # Provide sensible dynamic fallbacks for required paths if data_folder is NOT set
             # and they are missing from the configuration.
@@ -72,6 +103,14 @@ class Settings(BaseModel):
                 self.index_path = Path.home() / ".kb-agent" / "index"
             if not self.archive_path:
                 self.archive_path = Path.home() / ".kb-agent" / "archive"
+            if not self.skills_path:
+                self.skills_path = Path.home() / ".kb-agent" / "skills"
+            if not self.output_path:
+                self.output_path = Path.home() / ".kb-agent" / "output"
+            if not self.agent_tmp_path:
+                self.agent_tmp_path = Path.home() / ".kb-agent" / "agent_tmp"
+            if not self.sessions_path:
+                self.sessions_path = Path.home() / ".kb-agent" / "sessions"
                 
         if not self.audit_log_path:
             self.audit_log_path = Path("audit.log")
@@ -118,6 +157,22 @@ def _get_initial_data() -> Dict[str, Any]:
         
     return data
 
+def _migrate_legacy_llm_config(data: Dict[str, Any]):
+    if not data.get("llm_providers") and data.get("llm_api_key") and data.get("llm_base_url") and data.get("llm_model"):
+        model_name = data["llm_model"]
+        provider = {
+            "name": "default",
+            "base_url": data["llm_base_url"],
+            "api_key": data["llm_api_key"],
+            "models": [model_name]
+        }
+        data["llm_providers"] = [provider]
+        data["llm_roles"] = {
+            "strong": f"default/{model_name}",
+            "base": f"default/{model_name}",
+            "fast": f"default/{model_name}"
+        }
+
 def load_settings() -> Optional[Settings]:
     """Load settings from JSON, initializing from defaults/.env if JSON doesn't exist."""
     global settings
@@ -129,6 +184,7 @@ def load_settings() -> Optional[Settings]:
             data = _get_initial_data()
             _save_data(data)
             
+        _migrate_legacy_llm_config(data)
         settings = Settings(**data)
         
         # Load proxy env vars if they exist in OS env (as fallback/override)
@@ -164,6 +220,11 @@ def save_settings(new_settings: Settings):
     for field_name, value in new_settings:
         if isinstance(value, SecretStr):
             data[field_name] = value.get_secret_value()
+            
+    # Handle nested providers
+    if new_settings.llm_providers:
+        for i, provider in enumerate(new_settings.llm_providers):
+            data["llm_providers"][i]["api_key"] = provider.api_key.get_secret_value()
             
     # Clean up None values to keep JSON tidy
     data = {k: v for k, v in data.items() if v is not None}

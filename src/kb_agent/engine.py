@@ -22,6 +22,14 @@ from kb_agent.processor import Processor
 from kb_agent.agent.graph import compile_graph
 from kb_agent.agent.tools import reset_tools_cache
 
+# Agent Mode (LangGraph)
+from kb_agent.agent_mode.session import SessionManager
+from kb_agent.agent_mode.skills import SkillLoader
+from kb_agent.agent_mode.graph import build_agent_graph
+from kb_agent.agent_mode.nodes import register_status_callback, unregister_status_callback
+from langgraph.types import Command
+from langgraph.checkpoint.memory import MemorySaver
+
 # Regex to detect URLs, Jira tickets, and Confluence page IDs
 _URL_PATTERN = re.compile(r'https?://[^\s<>"\']+')
 _JIRA_PATTERN = re.compile(r'^[A-Z][A-Z0-9]+-\d+$', re.IGNORECASE)
@@ -41,6 +49,18 @@ class Engine:
 
         # Compile the agentic RAG graph once
         self._graph = compile_graph()
+        
+        # Agent Mode Components
+        self.session_manager = SessionManager()
+        self.skill_loader = SkillLoader()
+        self.skill_loader.scan()
+        
+        # Use MemorySaver so LangGraph can interrupt and persist
+        # Note: We still save our own JSON checkpoints for easy access,
+        # but LangGraph needs its native checkpointer for interrupts.
+        self._agent_checkpointer = MemorySaver()
+        self._agent_graph = build_agent_graph()
+        self._agent_graph.checkpointer = self._agent_checkpointer
 
     def _get_processor(self) -> Processor:
         """Lazy load processor to avoid circular imports or early config checks."""
@@ -136,8 +156,130 @@ class Engine:
                 )
             return answer, sources
         except Exception as e:
-            logger.error(f"Agentic RAG failed: {e}")
             return f"An error occurred while processing your query: {e}", []
+
+    # ------------------------------------------------------------------
+    # Agent Mode API (LangGraph)
+    # ------------------------------------------------------------------
+
+    def start_task(self, goal: str, on_status=None) -> str:
+        """Start a new agent mode task."""
+        def _status(status_dict):
+            if on_status:
+                emoji = status_dict.get("emoji", "")
+                msg = status_dict.get("msg", "")
+                on_status(emoji, msg)
+
+        session = self.session_manager.create(goal)
+        _status({"emoji": "🏁", "msg": f"Started new session {session.id}"})
+        
+        initial_state = {
+            "session_id": session.id,
+            "goal": goal,
+            "task_status": "init",
+            "execution_log": [],
+            "plan": [],
+            "current_step_index": 0,
+            "consecutive_failures": 0,
+            "max_consecutive_failures": 3,
+            "needs_human_input": False,
+        }
+        
+        config = {"configurable": {"thread_id": session.id}}
+        try:
+            register_status_callback(session.id, _status)
+            for event in self._agent_graph.stream(initial_state, config=config):
+                for node_name, output in event.items():
+                    if isinstance(output, dict) and "plan" in output:
+                        if on_status:
+                            on_status("INTERNAL_PLAN_UPDATE", output["plan"])
+                
+                # Check for interrupts
+                graph_state = self._agent_graph.get_state(config)
+                if graph_state.next:
+                    if on_status:
+                        # Heuristic for confirmation vs feedback
+                        # Check last message or state fields
+                        msg = "Agent requires your guidance to proceed."
+                        is_conf = False
+                        if "act" in graph_state.next:
+                            is_conf = True
+                            
+                        # Extract the actual interrupt message if available
+                        if graph_state.tasks:
+                            task = graph_state.tasks[0]
+                            if getattr(task, "interrupts", None) and len(task.interrupts) > 0:
+                                val = task.interrupts[0].value
+                                if val:
+                                    msg = str(val)
+                        
+                        on_status("INTERNAL_INTERRUPT", {
+                            "session_id": session.id,
+                            "message": msg,
+                            "is_confirmation": is_conf
+                        })
+
+        except Exception as e:
+            if on_status:
+                on_status("❌", f"Agent execution error: {e}")
+            logger.error(f"Agent execution failed: {e}", exc_info=True)
+        finally:
+            unregister_status_callback(session.id)
+            
+        return session.id
+
+    def resume_task(self, session_id: str, on_status=None, user_input: str = None) -> bool:
+        """Resume an existing agent mode task, optionally providing user input to an interrupt."""
+        def _status(status_dict):
+            if on_status:
+                emoji = status_dict.get("emoji", "")
+                msg = status_dict.get("msg", "")
+                on_status(emoji, msg)
+
+        try:
+            register_status_callback(session_id, _status)
+            # We must load the checkpointer state
+            config = {"configurable": {"thread_id": session_id}}
+            
+            # If there's user input to provide to an interrupt:
+            stream_input = None
+            if user_input is not None:
+                stream_input = Command(resume=user_input)
+                
+            for event in self._agent_graph.stream(stream_input, config=config):
+                for node_name, output in event.items():
+                    if isinstance(output, dict) and "plan" in output:
+                        if on_status:
+                            on_status("INTERNAL_PLAN_UPDATE", output["plan"])
+            
+            # Check for subsequent interrupts
+            graph_state = self._agent_graph.get_state(config)
+            if graph_state.next:
+                if on_status:
+                    msg = "Another intervention required."
+                    is_conf = "act" in graph_state.next
+                    
+                    if graph_state.tasks:
+                        task = graph_state.tasks[0]
+                        if getattr(task, "interrupts", None) and len(task.interrupts) > 0:
+                            val = task.interrupts[0].value
+                            if val:
+                                msg = str(val)
+                                
+                    on_status("INTERNAL_INTERRUPT", {
+                        "session_id": session_id,
+                        "message": msg,
+                        "is_confirmation": is_conf
+                    })
+                    
+            return True
+        except Exception as e:
+            if on_status:
+                on_status("❌", f"Agent execution error: {e}")
+            logger.error(f"Agent execution failed: {e}", exc_info=True)
+            return False
+        finally:
+            unregister_status_callback(session_id)
 
     # ------------------------------------------------------------------
     # URL handling (unchanged)

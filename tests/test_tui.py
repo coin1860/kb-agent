@@ -361,9 +361,9 @@ class TestSettings:
         async with app.run_test() as pilot:
             app.push_screen(SettingsDetailScreen("llm"), lambda r: None)
             await pilot.pause(delay=0.5)
-            assert app.screen.query_one("#api_key", Input) is not None
-            assert app.screen.query_one("#base_url", Input) is not None
-            assert app.screen.query_one("#model_name", Input) is not None
+            assert app.screen.query_one("#llm_providers_input", TextArea) is not None
+            assert app.screen.query_one("#role_strong", Input) is not None
+            assert app.screen.query_one("#role_base", Input) is not None
 
     async def test_backward_compat_alias(self):
         assert SettingsScreen is SettingsCategoryScreen
@@ -379,6 +379,9 @@ class TestChatMode:
             await pilot.press("tab")
             await pilot.pause()
             assert app.chat_mode == "knowledge_base"
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.chat_mode == "agent"
             await pilot.press("tab")
             await pilot.pause()
             assert app.chat_mode == "normal"

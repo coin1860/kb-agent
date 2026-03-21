@@ -1,5 +1,5 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Input, RichLog, Button, Static, Label, TextArea
+from textual.widgets import Header, Input, RichLog, Button, Static, Label, TextArea, TabbedContent, TabPane
 from textual.message import Message
 from textual.containers import Container, Horizontal, Vertical, Grid
 from textual.screen import ModalScreen
@@ -24,6 +24,7 @@ from kb_agent.connectors.jira import JiraConnector
 from kb_agent.connectors.confluence import ConfluenceConnector
 from kb_agent.tools.local_file_qa import LocalFileQATool
 from kb_agent.tools.vector_tool import VectorTool
+from kb_agent.agent_mode.ui.panel import AgentModeView, AgentPlanPanel, AgentExecutionLog
 
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 
@@ -54,8 +55,6 @@ SLASH_COMMANDS = CHAT_COMMANDS
 
 # ─── Settings Modal ─────────────────────────────────────────────────────────
 
-# ─── Settings Category Definitions ──────────────────────────────────────────
-
 SETTINGS_CATEGORIES = [
     ("llm", "🤖  LLM", "API Key, Base URL, Model, Embeddings"),
     ("rag", "🔍  RAG", "Iterations, Score Threshold, Chunking"),
@@ -63,7 +62,20 @@ SETTINGS_CATEGORIES = [
     ("general", "⚙️   General", "Data Folder, Debug Mode"),
 ]
 
-
+AGENT_COMMANDS = [
+    ("/abort", "Abort current agent execution"),
+    ("/clear", "Clear execution log"),
+    ("/help", "Show available commands"),
+    ("/new", "Start a new agent session"),
+    ("/pause", "Pause current agent execution"),
+    ("/quit", "Exit the application"),
+    ("/replan", "Force agent to replan current task"),
+    ("/resume", "Resume paused agent execution"),
+    ("/sessions", "List past agent sessions"),
+    ("/settings", "Open settings dialog"),
+    ("/skills", "List available skills"),
+    ("/status", "Show current agent status"),
+]
 class SettingsCategoryScreen(ModalScreen[bool]):
     """Level 1: Category selection menu for settings."""
 
@@ -234,19 +246,41 @@ class SettingsDetailScreen(ModalScreen[bool]):
 
     def _compose_llm(self):
         s = config.settings
-        api_key = s.llm_api_key.get_secret_value() if s and s.llm_api_key else ""
-        base_url = str(s.llm_base_url) if s and s.llm_base_url else ""
-        model = s.llm_model if s and s.llm_model else "gpt-4"
+        import json
+        
+        providers_json = "[\n]"
+        if s and getattr(s, "llm_providers", None):
+            providers = []
+            for p in s.llm_providers:
+                pd = p.model_dump(mode='json')
+                # Ensure api_key is passed correctly if it's SecretStr
+                from pydantic import SecretStr
+                if isinstance(pd.get("api_key"), SecretStr):
+                    pd["api_key"] = pd["api_key"].get_secret_value()
+                providers.append(pd)
+            providers_json = json.dumps(providers, indent=2)
+
+        strong_role = ""
+        base_role = ""
+        fast_role = ""
+        if s and getattr(s, "llm_roles", None):
+            strong_role = s.llm_roles.strong
+            base_role = s.llm_roles.base
+            fast_role = s.llm_roles.fast or ""
+
         emb_url = s.embedding_url if s and s.embedding_url else ""
         emb_model = s.embedding_model if s and s.embedding_model else ""
         emb_model_path = str(s.embedding_model_path) if s and s.embedding_model_path else ""
 
-        yield Label("API Key", classes="settings-label", id="lbl-api-key")
-        yield Input(placeholder="sk-...", value=api_key, password=False, id="api_key", classes="settings-input")
-        yield Label("Base URL", classes="settings-label", id="lbl-base-url")
-        yield Input(placeholder="https://api.openai.com/v1", value=base_url or "https://api.openai.com/v1", id="base_url", classes="settings-input")
-        yield Label("Model", classes="settings-label", id="lbl-model")
-        yield Input(placeholder="gpt-4", value=model, id="model_name", classes="settings-input")
+        yield Label("LLM Providers (JSON Array)", classes="settings-label", id="lbl-api-providers")
+        yield TextArea(text=providers_json, id="llm_providers_input", classes="settings-input", language="json")
+        yield Label("Strong Role", classes="settings-label")
+        yield Input(placeholder="provider/model", value=strong_role, id="role_strong", classes="settings-input")
+        yield Label("Base Role", classes="settings-label")
+        yield Input(placeholder="provider/model", value=base_role, id="role_base", classes="settings-input")
+        yield Label("Fast Role", classes="settings-label")
+        yield Input(placeholder="provider/model (optional)", value=fast_role, id="role_fast", classes="settings-input")
+        
         yield Label("Embedding URL", classes="settings-label", id="lbl-embedding-url")
         yield Input(placeholder="http://localhost:7999/v1", value=emb_url, id="embedding_url", classes="settings-input")
         yield Label("Embedding Model", classes="settings-label", id="lbl-embedding-model")
@@ -318,25 +352,35 @@ class SettingsDetailScreen(ModalScreen[bool]):
         updates = {}
 
         if self.category == "llm":
-            api_key = self.query_one("#api_key").value.strip()
-            base_url = self.query_one("#base_url").value.strip()
-            model = self.query_one("#model_name").value.strip() or "gpt-4"
+            providers_text = self.query_one("#llm_providers_input").text
+            strong_role = self.query_one("#role_strong").value.strip()
+            base_role = self.query_one("#role_base").value.strip()
+            fast_role = self.query_one("#role_fast").value.strip()
+            
+            import json
+            try:
+                providers_data = json.loads(providers_text)
+                if not isinstance(providers_data, list):
+                    raise ValueError("Providers must be a JSON array")
+            except Exception as e:
+                self.notify(f"Invalid JSON for providers: {e}", severity="error")
+                return
+                
+            if not strong_role or not base_role:
+                self.notify("Strong and Base roles are required!", severity="error")
+                return
+
             emb_url = self.query_one("#embedding_url").value.strip()
             emb_model = self.query_one("#embedding_model").value.strip()
             emb_model_path = self.query_one("#embedding_model_path").value.strip()
-            if not api_key:
-                # Accept empty API key if base_url is a local endpoint
-                if "localhost" not in base_url and "127.0.0.1" not in base_url:
-                    self.notify("API Key is required for remote models!", severity="error")
-                    return
-                # Otherwise, it's local, we use a placeholder or None.
-            if not base_url:
-                self.notify("Base URL is required!", severity="error")
-                return
+            
             updates = {
-                "llm_api_key": api_key,
-                "llm_base_url": base_url,
-                "llm_model": model,
+                "llm_providers": providers_data,
+                "llm_roles": {
+                    "strong": strong_role,
+                    "base": base_role,
+                    "fast": fast_role or None
+                },
                 "embedding_url": emb_url or None,
                 "embedding_model": emb_model or None,
                 "embedding_model_path": emb_model_path or None,
@@ -598,6 +642,76 @@ class WebEngineScreen(ModalScreen[str]):
             self.dismiss("")
 
 
+# ─── Agent Intervention Modal ───────────────────────────────────────────────
+
+class AgentInterventionScreen(ModalScreen[str | None]):
+    """Modal for human intervention or confirmation in Agent mode."""
+
+    def __init__(self, message: str, is_confirmation: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.message = message
+        self.is_confirmation = is_confirmation
+
+    CSS = """
+    AgentInterventionScreen { align: center middle; }
+    #intervention-dialog {
+        padding: 1 2;
+        width: 60;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+    }
+    #intervention-title {
+        text-align: center;
+        text-style: bold;
+        color: $warning;
+        margin-bottom: 1;
+    }
+    #intervention-msg {
+        margin-bottom: 1;
+        background: $boost;
+        padding: 1;
+    }
+    #intervention-input { margin-bottom: 1; }
+    #intervention-buttons { align: center middle; }
+    #intervention-buttons Button { margin: 0 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="intervention-dialog"):
+            yield Label("⚠️  AGENT INTERVENTION REQUIRED", id="intervention-title")
+            yield Static(self.message, id="intervention-msg")
+            
+            if not self.is_confirmation:
+                yield Input(placeholder="Enter guidance for agent...", id="intervention-input")
+                with Horizontal(id="intervention-buttons"):
+                    yield Button("Submit", variant="primary", id="submit")
+                    yield Button("Cancel", variant="error", id="cancel")
+            else:
+                with Horizontal(id="intervention-buttons"):
+                    yield Button("Approve", variant="success", id="approve")
+                    yield Button("Deny", variant="error", id="deny")
+                    yield Button("Edit Guidance", id="edit")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "submit":
+            val = self.query_one("#intervention-input", Input).value
+            self.dismiss(val if val.strip() else "Proceed")
+        elif event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "approve":
+            self.dismiss("approve")
+        elif event.button.id == "deny":
+            self.dismiss("deny")
+        elif event.button.id == "edit":
+            # Logic to switch to input mode if desired, but for now just dismiss with empty for manual
+            self.dismiss("edit")
+
+    def on_mount(self) -> None:
+        if not self.is_confirmation:
+            self.query_one("#intervention-input").focus()
+
+
 # ─── Command Palette ─────────────────────────────────────────────────────────
 
 class CommandPalette(Container):
@@ -643,7 +757,12 @@ class CommandPalette(Container):
         
         # Determine which command list to use based on app mode
         mode = getattr(self.app, "chat_mode", "normal")
-        cmd_list = CHAT_COMMANDS if mode == "normal" else RAG_COMMANDS
+        if mode == "agent":
+            cmd_list = AGENT_COMMANDS
+        elif mode == "knowledge_base":
+            cmd_list = RAG_COMMANDS
+        else:
+            cmd_list = CHAT_COMMANDS
         
         self._filtered = [
             (cmd, desc) for cmd, desc in cmd_list
@@ -717,12 +836,20 @@ class StatusBar(Static):
         emoji, color, label = indicators.get(state, ("?", "white", state))
         info = f" {detail}" if detail else ""
         
-        mode_str = "Chat Mode" if mode == "normal" else "KB RAG Mode"
-        mode_color = "green" if mode == "normal" else "#FFB000"
+        if mode == "agent":
+            mode_str = "Agent Mode"
+            mode_color = "cyan"
+        elif mode == "normal":
+            mode_str = "Chat Mode"
+            mode_color = "green"
+        else:
+            mode_str = "KB RAG Mode"
+            mode_color = "#FFB000"
         
         model = ""
         if config.settings:
-            model = f"  │  [{mode_color}]{mode_str}[/{mode_color}]  │  {config.settings.llm_model}"
+            model_name = config.settings.llm_roles.base if config.settings and config.settings.llm_roles else getattr(config.settings, "llm_model", "Unknown")
+            model = f"  │  [{mode_color}]{mode_str}[/{mode_color}]  │  {model_name}"
         self.update(f" [{color}]{emoji}[/{color}] {label}{info}{model}")
 
 
@@ -777,6 +904,24 @@ LOGO = """\
 [bold red]     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/bold red]
 [bold red]     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/bold red]
 [bold red]     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/bold red]
+"""
+
+AGENT_WELCOME = """\
+[bold cyan]Welcome to Agent Mode![/bold cyan]
+The Agent can perform complex tasks by planning and using skills.
+
+[bold]How to use:[/bold]
+1. [bold]Enter a goal:[/bold] Describe what you want the agent to do (e.g., "Analyze the last 5 Jira tickets and summarize them").
+2. [bold]Review the Plan:[/bold] The agent will create a step-by-step plan in the right panel.
+3. [bold]Monitor Execution:[/bold] Watch the execution logs to see the agent using skills.
+4. [bold]Interrupt:[/bold] Use [bold yellow]/abort[/bold yellow] to stop or [bold yellow]/pause[/bold yellow] to wait.
+
+[bold cyan]Agent Commands:[/bold cyan]
+  [bold yellow]/new[/bold yellow]      Start task  [bold yellow]/sessions[/bold yellow]  List tasks  [bold yellow]/skills[/bold yellow]   Show skills
+  [bold yellow]/status[/bold yellow]   Show state  [bold yellow]/replan[/bold yellow]    Force replan [bold yellow]/abort[/bold yellow]    Stop agent
+  [bold yellow]/pause[/bold yellow]    Pause agent [bold yellow]/resume[/bold yellow]    Resume agent
+
+[dim]────────────────────────────────────────[/dim]
 """
 
 WELCOME = """\
@@ -962,13 +1107,19 @@ class KBAgentApp(App):
         self.chat_history = []
 
     def compose(self) -> ComposeResult:
-        model_name = config.settings.llm_model if config.settings else "not configured"
+        model_name = config.settings.llm_roles.base if config.settings and config.settings.llm_roles else getattr(config.settings, "llm_model", "Unknown")
         yield Header(show_clock=False)
 
-        # Chat messages area
-        with Container(id="chat-area"):
-            yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
-            yield Button("📋 Copy", id="btn-copy")
+        with TabbedContent(initial="chat-mode") as tabs:
+            tabs.can_focus = False
+            with TabPane("Chat Mode", id="chat-mode"):
+                # Chat messages area
+                with Container(id="chat-area"):
+                    yield RichLog(id="chat-log", wrap=True, highlight=True, markup=True)
+                    yield Button("📋 Copy", id="btn-copy")
+                    
+            with TabPane("Agent Mode", id="agent-mode"):
+                yield AgentModeView(id="agent-view")
 
         # Bottom panel: palette + editor + status
         with Vertical(id="bottom-panel"):
@@ -995,6 +1146,7 @@ class KBAgentApp(App):
         self.action_copy_last_response()
 
     async def on_mount(self):
+        self._agent_welcome_shown = False
         log = self.query_one("#chat-log", RichLog)
 
         # Show logo + welcome on startup (no /help to keep it clean)
@@ -1002,7 +1154,7 @@ class KBAgentApp(App):
         log.write(WELCOME)
 
         if config.settings:
-            self.sub_title = config.settings.llm_model
+            self.sub_title = config.settings.llm_roles.base if config.settings and config.settings.llm_roles else getattr(config.settings, "llm_model", "Unknown")
         else:
             self.sub_title = "not configured"
 
@@ -1032,7 +1184,7 @@ class KBAgentApp(App):
         log = self.query_one("#chat-log", RichLog)
         if result:
             log.write("[green]● Settings saved[/green]")
-            self.sub_title = config.settings.llm_model if config.settings else ""
+            self.sub_title = config.settings.llm_roles.base if config.settings and config.settings.llm_roles else getattr(config.settings, "llm_model", "")
             try:
                 self.engine = Engine()
                 log.write("[green]● Engine ready[/green]")
@@ -1139,7 +1291,16 @@ class KBAgentApp(App):
                         ta.insert(selected + " ")
             else:
                 # Toggle chat mode
-                self.chat_mode = "normal" if self.chat_mode == "knowledge_base" else "knowledge_base"
+                current = self.chat_mode
+                if current == "normal":
+                    self.chat_mode = "knowledge_base"
+                    self.query_one(TabbedContent).active = "chat-mode"
+                elif current == "knowledge_base":
+                    self.chat_mode = "agent"
+                    self.query_one(TabbedContent).active = "agent-mode"
+                else:
+                    self.chat_mode = "normal"
+                    self.query_one(TabbedContent).active = "chat-mode"
             return
 
         if not palette.is_visible:
@@ -1163,6 +1324,11 @@ class KBAgentApp(App):
         cmd = parts[0].lower()
         log = self.query_one("#chat-log", RichLog)
         
+        agent_cmds = {"/new", "/sessions", "/status", "/pause", "/resume", "/abort", "/replan", "/skills", "/clear"}
+        if self.chat_mode == "agent" and cmd in agent_cmds:
+            self._exec_agent_slash(cmd, parts)
+            return
+            
         if cmd == "/help":
             log.write(HELP_TEXT)
         elif cmd in ("/settings", "/setting"):
@@ -1219,6 +1385,138 @@ class KBAgentApp(App):
     def _run_confluence_sync(self, result: dict | None):
         if result:
             self._run_confluence_sync_worker(result["page_id"], result["depth"])
+            
+    def _exec_agent_slash(self, cmd: str, parts: list[str]):
+        """Handler for slash commands in Agent mode."""
+        exec_log = self.query_one("#agent-exec-log", RichLog)
+        
+        if getattr(self, "engine", None) is None:
+            try:
+                self.engine = Engine()
+            except Exception as e:
+                exec_log.write(f"[red]✗ Engine init failed: {e}[/red]")
+                return
+
+        engine = self.engine
+        if not engine:
+            return
+
+        if cmd == "/new":
+            if len(parts) < 2:
+                exec_log.write("[yellow]Usage: /new <goal>[/yellow]")
+            else:
+                self._start_agent_task(parts[1])
+        elif cmd == "/sessions":
+            if len(parts) > 1:
+                # Switch session
+                sid = parts[1]
+                try:
+                    engine.session_manager.switch_to(sid)
+                    sess = engine.session_manager.get(sid)
+                    if sess:
+                        self.query_one(AgentPlanPanel).update_plan(sess.plan)
+                        exec_log.write(f"[green]Switched to session {sid}[/green]")
+                except Exception as e:
+                    exec_log.write(f"[red]Error switching session: {e}[/red]")
+            else:
+                sessions = engine.session_manager.list_all()
+                if not sessions:
+                    exec_log.write("[dim]No past sessions found.[/dim]")
+                else:
+                    active_id = engine.session_manager.active_session_id
+                    for s in sessions:
+                        active_mark = "[bold green]*[/bold green]" if s.id == active_id else " "
+                        exec_log.write(f"{active_mark} [cyan]{s.id}[/cyan]: {s.goal} ([dim]{s.status}[/dim])")
+        elif cmd == "/status":
+            sid = engine.session_manager.active_session_id
+            if not sid:
+                exec_log.write("[dim]No active session.[/dim]")
+            else:
+                sess = engine.session_manager.get(sid)
+                if sess:
+                    exec_log.write(f"[bold cyan]Session {sid}[/bold cyan]")
+                    exec_log.write(f"Goal: {sess.goal}")
+                    exec_log.write(f"Status: {sess.status}")
+                    exec_log.write(f"Steps: {len(sess.plan)}")
+        elif cmd == "/resume":
+            sid = parts[1] if len(parts) > 1 else engine.session_manager.active_session_id
+            user_input = " ".join(parts[2:]) if len(parts) > 2 else "Proceed"
+            if not sid:
+                exec_log.write("[yellow]Usage: /resume [id] [input][/yellow]")
+            else:
+                self._resume_agent_task(sid, user_input)
+        elif cmd == "/abort":
+            # Cancel current worker
+            self.workers.cancel_group(self, "agent-task")
+            exec_log.write("[bold red]Agent task aborted.[/bold red]")
+        elif cmd == "/clear":
+            exec_log.clear()
+        else:
+            exec_log.write(f"[dim]Agent command {cmd} not yet fully implemented in TUI.[/dim]")
+
+    @work(thread=True, exclusive=True)
+    def _start_agent_task(self, goal: str):
+        exec_log = self.query_one("#agent-exec-log", RichLog)
+        plan_panel = self.query_one(AgentPlanPanel)
+
+        def _on_event(emoji: str, msg: str):
+            if emoji == "INTERNAL_PLAN_UPDATE":
+                self.call_from_thread(plan_panel.update_plan, msg)
+            elif emoji == "INTERNAL_INTERRUPT":
+                self.call_from_thread(self._handle_agent_interrupt, msg)
+            else:
+                self.call_from_thread(exec_log.write, f"{emoji} {msg}")
+
+        self.call_from_thread(exec_log.write, f"[bold cyan]Starting new task:[/bold cyan] {goal}")
+        try:
+            engine = getattr(self, "engine", None)
+            if engine:
+                engine.start_task(goal, on_status=_on_event)
+                # Check if it finished or hit an interrupt
+                # If engine.start_task returns, we should double check if it's really done
+                self.call_from_thread(exec_log.write, "[bold green]Task sequence complete.[/bold green]")
+        except Exception as e:
+            self.call_from_thread(exec_log.write, f"[bold red]Task failed:[/bold red] {e}")
+
+    def _handle_agent_interrupt(self, info: dict):
+        """Called when agent hits an interrupt."""
+        msg = info.get("message", "Agent requires input.")
+        is_conf = info.get("is_confirmation", False)
+        session_id = info.get("session_id")
+
+        if not session_id:
+            return
+
+        def _on_dismiss(result: str | None):
+            if result is not None:
+                # Resume with result
+                self._resume_agent_task(session_id, result)
+            else:
+                self.notify("Agent task remains paused. Use /resume <id> <input> to proceed.", severity="warning")
+
+        self.push_screen(AgentInterventionScreen(msg, is_confirmation=is_conf), _on_dismiss)
+
+    @work(thread=True, exclusive=True)
+    def _resume_agent_task(self, session_id: str, user_input: str):
+        exec_log = self.query_one("#agent-exec-log", RichLog)
+        plan_panel = self.query_one(AgentPlanPanel)
+
+        def _on_event(emoji: str, msg: str):
+            if emoji == "INTERNAL_PLAN_UPDATE":
+                self.call_from_thread(plan_panel.update_plan, msg)
+            elif emoji == "INTERNAL_INTERRUPT":
+                self.call_from_thread(self._handle_agent_interrupt, msg)
+            else:
+                self.call_from_thread(exec_log.write, f"{emoji} {msg}")
+
+        self.call_from_thread(exec_log.write, f"[bold cyan]Resuming session {session_id} with input:[/bold cyan] {user_input}")
+        try:
+            engine = getattr(self, "engine", None)
+            if engine:
+                engine.resume_task(session_id, on_status=_on_event, user_input=user_input)
+                self.call_from_thread(exec_log.write, "[bold green]Resume sequence complete.[/bold green]")
+        except Exception as e:
+            self.call_from_thread(exec_log.write, f"[bold red]Resume failed:[/bold red] {e}")
 
     @work(thread=True, exclusive=True)
     def _run_jira_command(self, jira_id: str, query: str):
@@ -1588,6 +1886,9 @@ class KBAgentApp(App):
             if mode == "normal":
                 box.styles.border = ("tall", "green")
                 self.query_one("#chat-input").styles.cursor_color = "white"
+            elif mode == "agent":
+                box.styles.border = ("tall", "cyan")
+                self.query_one("#chat-input").styles.cursor_color = "cyan"
             else:
                 box.styles.border = ("tall", "darkorange")
                 self.query_one("#chat-input").styles.cursor_color = "#FFB000"
@@ -1597,9 +1898,28 @@ class KBAgentApp(App):
             
             # Log mode change
             log = self.query_one("#chat-log", RichLog)
-            mode_name = "Chat Mode" if mode == "normal" else "KB RAG Mode"
-            c = "green" if mode == "normal" else "#FFB000"
+            if mode == "agent":
+                mode_name = "Agent Mode"
+                c = "cyan"
+            elif mode == "normal":
+                mode_name = "Chat Mode"
+                c = "green"
+            else:
+                mode_name = "KB RAG Mode"
+                c = "#FFB000"
+            
             log.write(f"\n[dim]{self._ts()}[/dim]  [{c}]● Switched to {mode_name}[/{c}]")
+            
+            # Show welcome message in agent execution log if switching to agent mode
+            if mode == "agent":
+                try:
+                    if not getattr(self, "_agent_welcome_shown", False):
+                        exec_log = self.query_one("#agent-exec-log", RichLog)
+                        exec_log.write(AGENT_WELCOME)
+                        self._agent_welcome_shown = True
+                except:
+                    pass
+
         except:
             pass
         
