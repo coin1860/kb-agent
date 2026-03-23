@@ -1191,25 +1191,45 @@ class KBAgentApp(App):
             if len(parts) < 2:
                 log.write("[yellow]Usage: /jira <id> [query][/yellow]")
             else:
-                p2 = parts[1].split(maxsplit=1)
-                jira_id = p2[0]
-                query = p2[1] if len(p2) > 1 else "Please summarize this Jira issue."
+                raw_args = parts[1].strip()
+                # Extract Jira ID (e.g. PROJ-123) and the rest as query
+                match = re.match(r'^([a-zA-Z]+-\d+)\s*(.*)$', raw_args)
+                if match:
+                    jira_id = match.group(1).upper()
+                    query = match.group(2).strip() or "Please summarize this Jira issue."
+                else:
+                    p2 = raw_args.split(maxsplit=1)
+                    jira_id = p2[0].upper()
+                    query = p2[1] if len(p2) > 1 else "Please summarize this Jira issue."
                 self._run_jira_command(jira_id, query)
         elif cmd == "/confluence":
             if len(parts) < 2:
                 log.write("[yellow]Usage: /confluence <id> [query][/yellow]")
             else:
-                p2 = parts[1].split(maxsplit=1)
-                page_id = p2[0]
-                query = p2[1] if len(p2) > 1 else "Please summarize this Confluence page."
+                raw_args = parts[1].strip()
+                # Extract Confluence ID (numeric) and the rest as query
+                match = re.match(r'^(\d+)\s*(.*)$', raw_args)
+                if match:
+                    page_id = match.group(1)
+                    query = match.group(2).strip() or "Please summarize this Confluence page."
+                else:
+                    p2 = raw_args.split(maxsplit=1)
+                    page_id = p2[0]
+                    query = p2[1] if len(p2) > 1 else "Please summarize this Confluence page."
                 self._run_confluence_command(page_id, query)
         elif cmd == "/file":
             if len(parts) < 2:
                 log.write("[yellow]Usage: /file <filename> [query][/yellow]")
             else:
-                p2 = parts[1].split(maxsplit=1)
-                fname = p2[0]
-                query = p2[1] if len(p2) > 1 else "Please summarize this file."
+                raw_args = parts[1].strip()
+                match = re.match(r'^([a-zA-Z0-9_\-\.]+)\s*(.*)$', raw_args)
+                if match:
+                    fname = match.group(1)
+                    query = match.group(2).strip() or "Please summarize this file."
+                else:
+                    p2 = raw_args.split(maxsplit=1)
+                    fname = p2[0]
+                    query = p2[1] if len(p2) > 1 else "Please summarize this file."
                 self._run_file_command(fname, query)
         elif cmd == "/quit":
             self.exit()
@@ -1223,6 +1243,9 @@ class KBAgentApp(App):
     @work(thread=True, exclusive=True)
     def _run_jira_command(self, jira_id: str, query: str):
         log = self.query_one("#chat-log", RichLog)
+        
+        force_refresh = bool(re.search(r'(?i)(refresh\s+cache|刷新缓存|强制刷新|force\s+refresh)', query))
+        
         self.call_from_thread(self._refresh_status, "thinking", f"Fetching Jira {jira_id}...")
         self.call_from_thread(log.write, f"\n  [dim]{self._ts()}[/dim]  [bold yellow]/jira {jira_id}[/bold yellow]")
         
@@ -1231,7 +1254,7 @@ class KBAgentApp(App):
                 self.engine = Engine()
 
             connector = JiraConnector()
-            issue = connector.get_issue(jira_id)
+            issue = connector.get_issue(jira_id, force_refresh=force_refresh)
             if not issue:
                 self.call_from_thread(log.write, f"[red]✗ Jira issue {jira_id} not found.[/red]")
                 return
@@ -1240,7 +1263,7 @@ class KBAgentApp(App):
                 self.call_from_thread(log.write, f"[red]✗ Jira error: {issue['content']}[/red]")
                 return
 
-            context = f"Jira Issue: {issue['key']}\nSummary: {issue['title']}\nStatus: {issue['status']}\nDescription: {issue['content']}"
+            context = f"Jira Issue: {issue['id']}\nSummary: {issue['title']}\n\n{issue['content']}"
             answer = self.engine.answer_from_context(context, query, history=self.chat_history)
             self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
             self.chat_history.append({"role": "user", "content": f"/jira {jira_id} {query}"})
@@ -1253,6 +1276,9 @@ class KBAgentApp(App):
     @work(thread=True, exclusive=True)
     def _run_confluence_command(self, page_id: str, query: str):
         log = self.query_one("#chat-log", RichLog)
+        
+        force_refresh = bool(re.search(r'(?i)(refresh\s+cache|刷新缓存|强制刷新|force\s+refresh)', query))
+        
         self.call_from_thread(self._refresh_status, "thinking", f"Fetching Confluence {page_id}...")
         self.call_from_thread(log.write, f"\n  [dim]{self._ts()}[/dim]  [bold yellow]/confluence {page_id}[/bold yellow]")
         
@@ -1261,7 +1287,7 @@ class KBAgentApp(App):
                 self.engine = Engine()
 
             connector = ConfluenceConnector()
-            page = connector.get_page(page_id)
+            page = connector.get_page(page_id, force_refresh=force_refresh)
             if not page:
                 self.call_from_thread(log.write, f"[red]✗ Confluence page {page_id} not found.[/red]")
                 return

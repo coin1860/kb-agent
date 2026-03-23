@@ -12,6 +12,7 @@ from atlassian import Jira
 
 from .base import BaseConnector
 import kb_agent.config as config
+from kb_agent.connectors.cache import APICache
 
 logger = logging.getLogger("kb_agent_audit")
 
@@ -47,7 +48,7 @@ class JiraConnector(BaseConnector):
     # fetch_data — single issue by key, or text search
     # ------------------------------------------------------------------
 
-    def fetch_data(self, query: str) -> List[Dict[str, Any]]:
+    def fetch_data(self, query: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch Jira data.
 
@@ -63,16 +64,23 @@ class JiraConnector(BaseConnector):
         # Detect issue key pattern (e.g. ABC-123)
         import re
         if re.match(r'^[A-Z][A-Z0-9]+-\d+$', query.strip()):
-            return self._fetch_issue(query.strip())
+            return self._fetch_issue(query.strip(), force_refresh=force_refresh)
         else:
             return self._search_jql(f'text ~ "{query}" ORDER BY updated DESC')
 
-    def _fetch_issue(self, issue_key: str) -> List[Dict[str, Any]]:
+    def _fetch_issue(self, issue_key: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch a single Jira issue by key."""
         if not self.jira:
             return [{"id": issue_key, "title": "Jira not configured",
                      "content": "Jira client is not initialized.",
                      "metadata": {"source": "jira", "error": True}}]
+
+        cache = APICache()
+        if not force_refresh:
+            cached = cache.read("jira", issue_key)
+            if cached:
+                return [cached]
+
         try:
             issue_data = self.jira.issue(issue_key, expand="renderedFields")
             if not issue_data:
@@ -80,7 +88,12 @@ class JiraConnector(BaseConnector):
                          "content": f"Jira issue {issue_key} does not exist or access is denied.",
                          "metadata": {"source": "jira", "error": True}}]
                          
-            return [self._format_issue(issue_data)]
+            formatted_issue = self._format_issue(issue_data)
+            
+            # Cache the main issue
+            cache.write("jira", issue_key, formatted_issue)
+                    
+            return [formatted_issue]
 
         except Exception as e:
             logger.error(f"Jira API error for {issue_key}: {e}")
@@ -88,9 +101,9 @@ class JiraConnector(BaseConnector):
                      "content": f"Failed to fetch {issue_key}: {e}",
                      "metadata": {"source": "jira", "error": True}}]
 
-    def get_issue(self, issue_key: str) -> Optional[Dict[str, Any]]:
+    def get_issue(self, issue_key: str, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
         """Fetch a single Jira issue by key and return formatted dict (including errors)."""
-        results = self._fetch_issue(issue_key)
+        results = self._fetch_issue(issue_key, force_refresh=force_refresh)
         return results[0] if results else None
 
     def _search_jql(self, jql: str) -> List[Dict[str, Any]]:
@@ -178,8 +191,6 @@ JQL:"""
         summary = fields.get("summary", "")
         issue_url = f"{self.base_url}/browse/{issue_key}"
 
-        assignee = fields.get("assignee")
-        reporter = fields.get("reporter")
         status = fields.get("status", {})
         priority = fields.get("priority", {})
         issuetype = fields.get("issuetype", {})
@@ -191,39 +202,45 @@ JQL:"""
             f"# {issue_key} — {summary}",
             "",
             f"**Type:** {issuetype.get('name', 'Unknown')} | **Status:** {status.get('name', 'Unknown')} | **Priority:** {priority.get('name', 'Unknown')}",
-            f"**Assignee:** {assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'} | **Reporter:** {reporter.get('displayName', 'Unknown') if reporter else 'Unknown'}",
         ]
         if labels:
             content_parts.append(f"**Labels:** {', '.join(labels)}")
         if components:
             content_parts.append(f"**Components:** {', '.join(components)}")
-        content_parts.append(f"**Created:** {fields.get('created', '')} | **Updated:** {fields.get('updated', '')}")
         content_parts.append(f"**URL:** {issue_url}")
         content_parts.append("")
         content_parts.append("## Description")
         content_parts.append(description or "(No description)")
         
-        # --- Sub-tasks ---
+        # --- Extract Confluence links from description ---
+        import re
+        confluence_links = re.findall(
+            r'https?://[^\s\)\]]+/wiki/[^\s\)\]]+|'
+            r'https?://[^\s\)\]]+/display/[^\s\)\]]+|'
+            r'https?://[^\s\)\]]+/pages/viewpage\.action\?pageId=\d+',
+            description
+        )
+        if confluence_links:
+            content_parts.append("\n## Referenced Confluence Pages")
+            seen = set()
+            for link in confluence_links:
+                if link not in seen:
+                    seen.add(link)
+                    content_parts.append(f"- {link}")
+        
+        # --- Sub-tasks (NO keys exposed) ---
         subtasks = fields.get("subtasks", [])
         if subtasks:
-            content_parts.append("\n## Sub-Tasks")
-            content_parts.append("| Key | Summary | Status | Assignee |")
-            content_parts.append("|-----|---------|--------|----------|")
+            content_parts.append(f"\n## Sub-Tasks ({len(subtasks)} total)")
             for st in subtasks:
-                st_key = st.get("key", "")
                 st_summary = st.get("fields", {}).get("summary", "")
                 st_status = st.get("fields", {}).get("status", {}).get("name", "")
-                st_assignee = st.get("fields", {}).get("assignee", {})
-                st_assignee_name = st_assignee.get("displayName", "Unassigned") if st_assignee else "Unassigned"
-                link = f"[{st_key}]({self.base_url}/browse/{st_key})"
-                content_parts.append(f"| {link} | {st_summary} | {st_status} | {st_assignee_name} |")
+                content_parts.append(f"- {st_summary} ({st_status})")
 
-        # --- Issue Links ---
+        # --- Related Issues (no keys in content) ---
         issuelinks = fields.get("issuelinks", [])
         if issuelinks:
             content_parts.append("\n## Related Issues")
-            content_parts.append("| Relationship | Key | Summary | Status |")
-            content_parts.append("|-------------|-----|---------|--------|")
             for link in issuelinks:
                 link_type = link.get("type", {})
                 if "outwardIssue" in link:
@@ -234,11 +251,9 @@ JQL:"""
                     linked = link["inwardIssue"]
                 else:
                     continue
-                lk = linked.get("key", "")
                 ls = linked.get("fields", {}).get("summary", "")
                 lst = linked.get("fields", {}).get("status", {}).get("name", "")
-                md_link = f"[{lk}]({self.base_url}/browse/{lk})"
-                content_parts.append(f"| {relation} | {md_link} | {ls} | {lst} |")
+                content_parts.append(f"- {relation}: {ls} ({lst})")
 
         return {
             "id": issue_key,
@@ -248,10 +263,12 @@ JQL:"""
                 "source": "jira",
                 "status": status.get("name", "Unknown"),
                 "priority": priority.get("name", "Unknown"),
-                "assignee": assignee.get("displayName", "") if assignee else "",
                 "type": issuetype.get("name", ""),
                 "labels": labels,
                 "url": issue_url,
+                "subtask_keys": [st.get("key") for st in subtasks if st.get("key")],
+                "has_subtasks": bool(subtasks),
+                "subtask_count": len(subtasks),
             },
         }
 

@@ -1227,6 +1227,12 @@ SYNTHESIZE_SYSTEM = (
     "6. **CITATIONS**: You MUST cite your sources using bracketed numbers, e.g., [1], [2].\n"
     "   The context items provided will contain markers like [SOURCE:path/to/file.md:L123] or [SOURCE:path:L123:S0.95].\n"
     "   When you use information from an item, append its corresponding number to the sentence.\n"
+    "7. **Jira Issue Summarization**: When summarizing a Jira issue, you MUST:\n"
+    "   a) Focus primarily on the Description content — this is the most important section.\n"
+    "   b) If the description references Confluence pages or external documents, highlight and summarize those references.\n"
+    "   c) Provide a brief overview of sub-task progress if sub-tasks exist (e.g., '5 of 12 completed'), but do NOT "
+    "      enumerate every sub-task individually unless the user specifically asks.\n"
+    "   d) Do NOT list individual sub-task assignees or detailed statuses unless specifically asked.\n"
 )
 
 

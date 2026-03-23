@@ -61,29 +61,27 @@ The system SHALL discard context items with relevance score below 0.3 before syn
 - **THEN** the system triggers a RE-RETRIEVE action instead of synthesizing with no evidence
 
 ### Requirement: Adaptive decision based on aggregate score
-The system SHALL compute the average relevance score of remaining evidence and route to one of three actions: GENERATE, REFINE, or RE-RETRIEVE. On REFINE or RE_RETRIEVE, the system SHALL preserve file hints from discarded context for the planner to follow in the next round.
+The system SHALL compute the average relevance score of remaining evidence and assign one of three actions: GENERATE, REFINE, or RE-RETRIEVE. The `grade_evidence_node` SHALL NOT make the final routing decision; instead, all flows SHALL proceed to the `reflect_node` for entity extraction and task planning.
 
 #### Scenario: High-quality evidence triggers GENERATE
 - **WHEN** the average score of filtered evidence is ≥ 0.7
 - **THEN** `AgentState.grader_action` is set to `"GENERATE"`
-- **AND** the graph routes to the `synthesize` node
+- **AND** the graph routes to the `reflect_node` for final precision evaluation
 
 #### Scenario: Mixed-quality evidence triggers REFINE
 - **WHEN** the average score of filtered evidence is ≥ 0.3 and < 0.7
 - **THEN** `AgentState.grader_action` is set to `"REFINE"`
 - **AND** the system retains items with score ≥ 0.3 in context
-- **AND** the system SHALL extract and preserve file paths, Jira ticket IDs, and Confluence page IDs from ALL context items (including low-scored ones) into `AgentState.context_file_hints`
-- **AND** the graph routes back to `plan` to search for additional evidence
+- **AND** the graph routes to the `reflect_node` 
 
 #### Scenario: Poor evidence triggers RE-RETRIEVE with preserved hints
 - **WHEN** the average score of filtered evidence is < 0.3 (or no evidence remains)
 - **THEN** `AgentState.grader_action` is set to `"RE_RETRIEVE"`
-- **AND** the system SHALL extract and preserve file paths, Jira ticket IDs, and Confluence page IDs from ALL context items (including discarded ones) into `AgentState.context_file_hints`
-- **AND** the graph routes back to `plan` with `context_file_hints` available for the planner
+- **AND** the graph routes to the `reflect_node` 
 
 #### Scenario: Max iterations reached regardless of score
 - **WHEN** `AgentState.iteration` reaches `KB_AGENT_MAX_ITERATIONS`
-- **THEN** the system routes to `synthesize` regardless of grader action
+- **THEN** the system still routes to `reflect_node` regardless of grader action
 - **AND** the system uses whatever evidence is available (even if low-scored)
 
 ### Requirement: Pre-filter thresholds are configurable
