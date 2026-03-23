@@ -266,7 +266,6 @@ JQL:"""
                 "type": issuetype.get("name", ""),
                 "labels": labels,
                 "url": issue_url,
-                "subtask_keys": [st.get("key") for st in subtasks if st.get("key")],
                 "has_subtasks": bool(subtasks),
                 "subtask_count": len(subtasks),
             },
