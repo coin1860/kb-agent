@@ -28,33 +28,31 @@ Designed for **high-security banking environments**, it provides traceability, a
 
 ### 🧠 Adaptive CRAG with LangGraph
 
-* **Query Intent Decomposition**: Incoming queries are analyzed and split into parallel sub-queries for maximum recall.
-* **Intelligent Retry**: Follows discovered context clues (Jira IDs, File Paths, Confluence Pages) on retry rounds instead of blindly re-searching.
-* **CRAG Evidence Grading**: Each evidence item is scored 0.0–1.0. The system routes to GENERATE (avg ≥ 0.7), REFINE (0.3–0.7), or RE-RETRIEVE (< 0.3).
+* **Query Intent Decomposition**: Incoming queries are analyzed by `analyze_and_route` to split into parallel sub-queries or route to direct answers.
+* **Agentic CLI (`kb-cli`)**: A dedicated entry point for automated task execution (reports, data analysis) with YAML playbooks and human-in-the-loop approval.
+* **Precise Entity Discovery**: `reflect_node` uses high-performance regex to extract Jira IDs and Confluence Page IDs from retrieved text, queuing exact-fetch tasks to bypass LLM planning.
+* **Cross-Encoder Reranking**: Optional secondary reranking using `bge-reranker-v2-m3` (GGUF) to prioritize the most relevant chunks from 20+ candidates down to the top 3.
+* **Atlassian Smart Cache**: Persistent local cache for Jira and Confluence data, including automatic subtask summary archival to minimize API latency.
 * **Interactive Source Citations**: Answers include clickable references; click to view the full source chunk in a modal window.
 * **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history.
-* **CSV Data Analysis**: Native support for querying large CSV files using structured Pandas filters, avoiding truncation issues in standard vector indexing.
-* **Stateful Routing**: Dedicated `analyze_and_route` gateway resolves pronouns, extracts active entities (Jira/Confluence IDs), and routes chitchat vs. retrieval queries.
-* **Local ONNX Embeddings**: Run fully offline with local ONNX embedding models — no internet or PyTorch required.
-* **Recursive Reasoning Loop**: `Decompose → Plan → Execute → Grade → (loop or answer)` with a configurable iteration cap (default 3).
+* **Local BGE-M3 Embeddings**: High-density vector embeddings using `BAAI/bge-m3` with 8192 context support and optimized CLS-pooling for Apple M-series silicon.
+* **Recursive Reasoning Loop**: `Analyze → Plan → Execute → Rerank → Grade → Reflect → (loop or answer)` with a configurable iteration cap (default 3).
 
 > 📖 **[Architecture Deep-Dive →](docs/agentic-rag-architecture.md)** — Mermaid diagrams, LLM call analysis, and enhancement roadmap.
 
 ### 🔧 Agent Tools
 
-| Tool | Backend | Purpose |
-|---|---|---|
-| `vector_search` | ChromaDB | Semantic similarity search over indexed documents |
-| `read_file` | FileTool | Read document content (supports `start_line`/`end_line` for partial reads) |
-| `jira_fetch` | Jira API | Fetch Jira issue details (includes sub-tasks and linked issues) |
-| `jira_jql` | Jira API | Natural language → JQL search (e.g. "my unresolved tasks") |
-| `confluence_fetch`| Confluence API| Fetch Confluence page details by ID or title |
-| `web_fetch` | HTTP + HTML→MD| Fetch and convert web pages (markdownify or crawl4ai) |
-| `local_file_qa` | Vector + Filename| File discovery and Q&A on specific files |
-| `csv_info` | Pandas | Get CSV schema (columns, types) and data sample |
-| `csv_query` | Pandas | Query CSV using structured JSON (filters and column selection) |
-| `graph_related`* | NetworkX | Traverse Knowledge Graph relationships (*Experimental*) |
-| `grep_search`* | Ripgrep | Keyword search with context windows (*Disabled*) |
+| Tool | Backend | Purpose | Approval Required |
+|---|---|---|---|
+| `vector_search` | ChromaDB | Semantic similarity search via BGE-M3 | No |
+| `read_file` | FileTool | Read document content with line-range support | No |
+| `jira_fetch` | Jira API | Fetch Jira issue details (cached with subtasks) | No |
+| `confluence_fetch`| Confluence API| Fetch Confluence page details by ID/Title (cached) | No |
+| `csv_query` | Pandas | Query CSV using structured JSON filters | No |
+| `web_fetch` | HTTP | Fetch and convert web pages to Markdown | No |
+| `write_file` | FileTool | Create, modify, or delete files (CLI Agent only) | **YES** |
+| `run_python` | Subprocess | Execute generated Python scripts (CLI Agent only) | **YES** |
+| `local_file_qa` | Vector | Targeted Q&A on specific directories/files | No |
 
 ### 🕸️ Knowledge Graph
 
@@ -85,30 +83,39 @@ Designed for **high-security banking environments**, it provides traceability, a
 
 ```mermaid
 graph TD
-    Start(["🎯 User Query"]) --> Plan
+    Start(["🎯 User Query"]) --> AnalyzeRoute
 
     subgraph "LangGraph StateGraph (Adaptive Loop)"
-        Plan["🧠 plan<br/>Tool Selection / Decomposition<br/><i>LLM Call #1 (Round 0: Decomposition)</i>"]
-        ToolExec["🔍 tool_exec<br/>Execute Tools:<br/>- vector_search / read_file<br/>- jira_fetch / jira_jql<br/>- confluence_fetch<br/>- csv_info / csv_query<br/>- web_fetch"]
-        Grade["⚖️ grade_evidence<br/>CRAG Evidence Scoring<br/><i>LLM Call #2</i>"]
-        Synth["✨ synthesize<br/>Answer with Citations<br/><i>LLM Call #3</i>"]
+        AnalyzeRoute["🔍 analyze_and_route<br/>Intent / Entity Extraction"]
+        Plan["🧠 plan<br/>Task Queue / Decomposition<br/><i>LLM Call (if queue empty)</i>"]
+        ToolExec["🛠️ tool_exec<br/>Execute Tools (Vector, Jira, Conf, CSV)"]
+        Rerank["🎯 rerank<br/>Cross-Encoder Sorting<br/><i>bge-reranker-v2-m3</i>"]
+        Grade["⚖️ grade_evidence<br/>CRAG Relevance Scoring"]
+        Reflect["🪞 reflect<br/>ID Extraction / Task Queuing"]
+        Synth["✨ synthesize<br/>Answer with Citations"]
 
+        AnalyzeRoute -->|"🔎 search"| Plan
+        AnalyzeRoute -->|"💬 direct"| Synth
         Plan --> ToolExec
-        ToolExec --> Grade
-        Grade -->|"✅ GENERATE<br/>avg ≥ 0.7"| Synth
-        Grade -->|"🔄 REFINE / RE_RETRIEVE<br/>avg < 0.7<br/>& iter < max"| Plan
-        Grade -->|"⏱️ Max Iterations"| Synth
+        ToolExec --> Rerank
+        Rerank --> Grade
+        Grade --> Reflect
+        Reflect -->|"✅ SUFFICIENT"| Synth
+        Reflect -->|"🔄 NEEDS_PRECISION<br/>& iter < max"| Plan
+        Reflect -->|"⏱️ EXHAUSTED"| Synth
     end
 
     Synth --> Mask["🛡️ Security Masking"]
-    Mask --> End(["📝 Final Answer (with citations)"])
+    Mask --> End(["📝 Final Answer"])
 
     style Start fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
     style End fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
-    style Decompose fill:#e3f2fd,stroke:#1565c0,color:#000
+    style AnalyzeRoute fill:#fff9c4,stroke:#fbc02d,color:#000
     style Plan fill:#e3f2fd,stroke:#1565c0,color:#000
     style ToolExec fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style Rerank fill:#f3e5f5,stroke:#7b1fa2,color:#000
     style Grade fill:#fff3e0,stroke:#ef6c00,color:#000
+    style Reflect fill:#e0f2f1,stroke:#00796b,color:#000
     style Synth fill:#fce4ec,stroke:#c62828,color:#000
     style Mask fill:#f3e5f5,stroke:#6a1b9a,color:#000
 ```
@@ -254,7 +261,34 @@ kb-agent
 | `Ctrl+L` | Clear chat |
 | `Ctrl+Q` | Quit |
 
-### 3. Slash Commands
+### 3. Running the Agent CLI (kb-cli)
+
+For automated task execution and skill playbooks:
+
+```bash
+kb-cli
+```
+
+![KB-Cli Screenshot](docs/image/cli.png)
+
+**Workflow:**
+1.  **Intent Matching**: Automatically matches your query to a skill (e.g., `weekly-jira-report`) or treats it as a general agent task.
+2.  **Planning**: Generates a numbered step-by-step plan.
+3.  **Approval Gate**:
+    -   **Read-only plans** (searching, reading) execute automatically.
+    -   **Side-effect plans** (`write_file`, `run_python`) prompt for explicit human approval `[a]pprove / [e]dit / [q]uit`.
+4.  **Execution**: Rich scrolling output with real-time status updates and interrupt support (`Ctrl+C`).
+
+**Key Primitive Tools:**
+
+The `kb-cli` agent has access to all RAG tools plus special atomic tools for task automation:
+
+*   **`@`-File Picker**: Type `@` followed by a filename to instantly resolve local files from the `data_folder/input/` directory to absolute paths for the LLM.
+*   **`write_file`**: Create, overwrite, or delete files in the output directory. Used for report generation and data export. (*Requires Approval*)
+*   **`run_python`**: Execute dynamically generated Python code in a session-scoped environment. Ideal for complex data transformations or custom API integrations. (*Requires Approval*)
+*   **`csv_query`**: Perform structured Pandas-based queries on local CSV data for precise filtering and aggregation.
+
+### 4. Slash Commands
 
 | Command | Description |
 |---|---|
@@ -267,7 +301,7 @@ kb-agent
 | `/clear` | Clear chat history |
 | `/quit` | Exit the application |
 
-### 4. Inline URL Indexing
+### 5. Inline URL Indexing
 
 Paste any HTTP/HTTPS URL directly into the chat to fetch, parse, and index the web page content automatically.
 
@@ -289,10 +323,16 @@ src/kb_agent/
 ├── security.py         # PII Masking
 ├── llm.py              # OpenAI-compatible LLM client
 ├── agent/              # ⭐ Adaptive CRAG (LangGraph)
-│   ├── state.py        # AgentState TypedDict
+│   ├── state.py        # AgentState TypedDict (task_queue, entities)
 │   ├── tools.py        # LangChain @tool wrappers
-│   ├── nodes.py        # Graph nodes (decompose, plan, tool, grade, synthesize)
+│   ├── nodes.py        # Graph nodes (analyze, decompose, plan, rerank, grade, reflect)
 │   └── graph.py        # StateGraph topology & CRAG routing
+├── skill/              # 🛠️ Agentic CLI (`kb-cli`)
+│   ├── planner.py      # Multi-step task planner
+│   ├── executor.py     # Skill engine with approval gates
+│   ├── router.py       # YAML skill intent matcher
+│   ├── renderer.py     # Rich-based CLI rendering
+│   └── interruptor.py  # Ctrl+C handler & state recovery
 ├── graph/
 │   └── graph_builder.py # NetworkX Knowledge Graph construction
 ├── tools/

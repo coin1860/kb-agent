@@ -35,10 +35,13 @@ dependencies = [
     "onnxruntime>=1.15.0",
     "tokenizers>=0.13.0",
     "llama-cpp-python>=0.3.16",
+    "typer>=0.12",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]
 kb-agent = "kb_agent.cli:main"
+kb-cli = "kb_agent.skill_cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

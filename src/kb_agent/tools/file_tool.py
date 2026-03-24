@@ -13,6 +13,8 @@ class FileTool:
                 self.allowed_paths.append(settings.source_docs_path.resolve())
             if settings.index_path:
                 self.allowed_paths.append(settings.index_path.resolve())
+            if settings.input_path:
+                self.allowed_paths.append(settings.input_path.resolve())
 
     def read_file(self, file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """

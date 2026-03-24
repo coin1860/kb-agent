@@ -184,6 +184,65 @@ class ConfluenceConnector(BaseConnector):
     # Helpers
     # ------------------------------------------------------------------
 
+    def create_page(self, parent_id: str, title: str, content: str) -> Dict[str, Any]:
+        """
+        Create a new Confluence page as a child of parent_id.
+        
+        Args:
+            parent_id: The numeric ID of the parent page.
+            title: The title of the new page.
+            content: The Markdown content for the page (will be converted to HTML storage format).
+        """
+        if not self.confluence:
+            return {"id": "error", "title": "Confluence not configured",
+                    "content": "Confluence client is not initialized.",
+                    "metadata": {"source": "confluence", "error": True}}
+
+        try:
+            # atlassian-python-api create_page expects:
+            # space, title, body, parent_id=None, type='page', representation='storage'
+            
+            # 1. Get parent space key
+            parent_page = self.confluence.get_page_by_id(parent_id, expand="space")
+            if not parent_page:
+                return {"id": "error", "title": "Parent not found",
+                        "content": f"Parent page ID {parent_id} does not exist.",
+                        "metadata": {"source": "confluence", "error": True}}
+            
+            space_key = parent_page.get("space", {}).get("key")
+            if not space_key:
+                return {"id": "error", "title": "Space error",
+                        "content": f"Could not determine space for parent page {parent_id}.",
+                        "metadata": {"source": "confluence", "error": True}}
+
+            # 2. Create the page
+            # Note: atlassian-python-api takes care of storage format if we just pass a string?
+            # Actually, we should probably ensure it's wrapped or at least plain.
+            # But wait, it converts markdown? No, we should convert MD to HTML if we want it to look good.
+            # However, for now, we just pass the content.
+            
+            new_page = self.confluence.create_page(
+                space=space_key,
+                title=title,
+                body=content,
+                parent_id=parent_id,
+                type='page',
+                representation='storage'
+            )
+            
+            if not new_page:
+                return {"id": "error", "title": "Creation failed",
+                        "content": "Confluence API returned no data after create_page.",
+                        "metadata": {"source": "confluence", "error": True}}
+            
+            return self._format_page(new_page)
+
+        except Exception as e:
+            logger.error(f"Confluence create_page error: {e}")
+            return {"id": "error", "title": "Confluence API error",
+                     "content": f"Failed to create page: {e}",
+                     "metadata": {"source": "confluence", "error": True}}
+
     def _format_page(self, data: dict) -> Dict[str, Any]:
         """Format a raw Confluence page JSON to our standard format."""
         body_html = data.get("body", {}).get("storage", {}).get("value", "")

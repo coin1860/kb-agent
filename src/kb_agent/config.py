@@ -40,6 +40,10 @@ class Settings(BaseModel):
     archive_path: Optional[Path] = Field(None, description="Path to archive processed docs")
     audit_log_path: Optional[Path] = Field(None, description="Path to the audit log file")
     cache_path: Optional[Path] = Field(None, description="Path for caching external connector data")
+    skills_path: Optional[Path] = Field(None, description="Path to skill playbook YAML files")
+    output_path: Optional[Path] = Field(None, description="Path to write skill execution outputs")
+    python_code_path: Optional[Path] = Field(None, description="Path to store agent-generated Python scripts")
+    input_path: Optional[Path] = Field(None, description="Path to input files for kb-cli @-mention file picker")
 
     # Proxy
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
@@ -76,6 +80,15 @@ class Settings(BaseModel):
                 
         if not self.cache_path:
             self.cache_path = (self.data_folder / "cache") if self.data_folder else (Path.home() / ".kb-agent" / "cache")
+
+        if not self.skills_path:
+            self.skills_path = (self.data_folder / "skills") if self.data_folder else (Path.home() / ".kb-agent" / "skills")
+        if not self.output_path:
+            self.output_path = (self.data_folder / "output") if self.data_folder else (Path.home() / ".kb-agent" / "output")
+        if not self.python_code_path:
+            self.python_code_path = (self.data_folder / "python_code") if self.data_folder else (Path.home() / ".kb-agent" / "python_code")
+        if not self.input_path:
+            self.input_path = (self.data_folder / "input") if self.data_folder else (Path.home() / ".kb-agent" / "input")
 
         if not self.audit_log_path:
             self.audit_log_path = Path("audit.log")

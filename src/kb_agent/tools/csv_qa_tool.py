@@ -36,10 +36,10 @@ def _find_csv_file(filename: str) -> Optional[str]:
     if archive_path.exists():
         return str(archive_path)
         
-    # Priority 2: source folder
-    source_path = base_dir / "source" / filename
-    if source_path.exists():
-        return str(source_path)
+    # Priority 3: input folder
+    input_path = base_dir / "input" / filename
+    if input_path.exists():
+        return str(input_path)
         
     return None
 
