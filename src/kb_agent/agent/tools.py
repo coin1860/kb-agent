@@ -332,20 +332,6 @@ def local_file_qa(filename_prefix: str) -> str:
 
 
 @tool
-def summary(text: str) -> str:
-    """Use natural language to reply to the user based on the original question and the results of previous actions.
-    
-    Use this tool for internal reasoning, summarizing meeting minutes, 
-    categorizing information, or synthesizing tool results to form a final answer.
-    
-    Args:
-        text: The content/results to be summarized or analyzed.
-    """
-    return text  # The executor's reflection/summary logic will handle the actual summarization.
-
-
-
-@tool
 def csv_info(filename: str) -> str:
     """Get the schema and a small sample of a CSV file.
 
@@ -392,8 +378,7 @@ ALL_TOOLS = [
     web_fetch,
     local_file_qa,
     csv_info,
-    csv_query,
-    summary
+    csv_query
 ]
 
 # NOTE: Cannot set arbitrary attributes on Pydantic StructuredTool objects.

@@ -38,7 +38,6 @@ Available tools (with approval requirement):
 11. write_file(path: str, content: str, mode: str) — Write/delete a file under data_folder.
     mode: 'create' | 'overwrite' | 'append' | 'delete'. [REQUIRES APPROVAL]
 12. run_python(script_path: str, timeout_seconds: int=60) — Execute a Python script. [REQUIRES APPROVAL]
-13. summary(text: str) — Summarize final results to answer the user's query. [no approval]
 """
 
 PLANNER_SYSTEM = """\
@@ -149,22 +148,6 @@ def _parse_plan(raw: str) -> list[PlanStep]:
     return steps
 
 
-def _ensure_summary_step(steps: list[PlanStep]) -> list[PlanStep]:
-    """Appends a summary step if the last step generates output that needs summarizing."""
-    if not steps:
-        return steps
-    last_tool = steps[-1].tool
-    if last_tool != "summary" and last_tool in ("write_file", "run_python", "vector_search"):
-        steps.append(PlanStep(
-            step_number=len(steps) + 1,
-            description="Summarize the final results to answer the user's original query.",
-            tool="summary",
-            args={"text": "Please summarize the results to formulate a final natural language answer for the user."},
-            requires_approval=False,
-        ))
-    return steps
-
-
 def generate_plan(
     command: str,
     session: Session,
@@ -216,7 +199,7 @@ def generate_plan(
             )]
 
         log_audit("skill_plan_result", {"steps": [s.tool for s in steps]})
-        return _ensure_summary_step(steps)
+        return steps
 
     except Exception as e:
         logger.error("Planner failed: %s", e)
@@ -267,7 +250,7 @@ def replan(
         ])
         steps = _parse_plan(response.content.strip())
         if steps:
-            return _ensure_summary_step(steps)
+            return steps
     except Exception as e:
         logger.error("Replan failed: %s", e)
 
