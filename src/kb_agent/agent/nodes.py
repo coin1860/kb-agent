@@ -198,13 +198,13 @@ def _extract_json(text: str) -> Any:
 def _is_tool_applicable(tool_name: str, query: str) -> bool:
     """Validate if a tool is applicable to the given query."""
     if tool_name == "jira_fetch":
-        return bool(re.search(r'[A-Z]+-\d+', query))
+        return bool(re.search(r'\b[A-Z][A-Z0-9]{1,9}-\d{3,5}\b', query))
     if tool_name == "csv_query":
         return bool(re.search(r'\.csv', query, re.IGNORECASE))
     if tool_name == "jira_jql":
         return True
     if tool_name == "confluence_fetch":
-        return bool(re.search(r'confluence|wiki|page.?\d+|\d{5,}', query, re.IGNORECASE))
+        return bool(re.search(r'confluence|wiki|page.?\d+|\b\d{9,10}\b', query, re.IGNORECASE))
     if tool_name == "web_fetch":
         return bool(re.search(r'https?://', query))
     return True
@@ -226,14 +226,14 @@ def _build_tool_args(tool_name: str, query: str) -> dict[str, str] | None:
     if tool_name == "graph_related":
         return {"entity_id": query_str}
     if tool_name == "jira_fetch":
-        match = re.search(r'([A-Z]+-\d+)', query_str)
+        match = re.search(r'\b([A-Z][A-Z0-9]{1,9}-\d{3,5})\b', query_str)
         if match:
             return {"issue_key": match.group(1)}
         return None
     if tool_name == "jira_jql":
         return {"query": query_str}
     if tool_name == "confluence_fetch":
-        match = re.search(r'(\d{5,})', query)
+        match = re.search(r'(\d{9,10})', query)
         if match:
             return {"page_id": match.group(1)}
         return None
@@ -313,7 +313,7 @@ TOOL_DESCRIPTIONS = """Available tools:
 4. graph_related(entity_id: str) — Find related entities in the Knowledge Graph (e.g. parent Jira ticket, linked pages). Input is an entity ID like 'PROJ-123' or 'document.md'.
 5. jira_fetch(issue_key: str) — Fetch a Jira issue by key (e.g. 'PROJ-123'). Returns issue details.
 6. jira_jql(query: str) — Convert natural language to Jira JQL and search. Use for semantic queries like "my unresolved tasks".
-7. confluence_fetch(page_id: str) — Fetch a Confluence page by its numeric ID (5+ digits like 132123, 456789) or search by text. **IMPORTANT**: If the query contains a 5+ digit number, it is very likely a Confluence page ID — you MUST call this tool with that number.
+7. confluence_fetch(page_id: str) — Fetch a Confluence page by its numeric ID (9-10 digits like 1231231233) or search by text. **IMPORTANT**: If the query contains a 9-10 digit number, it is very likely a Confluence page ID — you MUST call this tool with that number.
 8. web_fetch(url: str) — Fetch a specific web page by URL and convert to Markdown. The 'url' parameter MUST be a valid HTTP/HTTPS URL (e.g., 'https://domain.com'). Do NOT use this tool for natural language web searches.
 9. local_file_qa(filename_prefix: str) — Read a local file from the datastore by its exact filename or prefix (e.g. '银行开户指南'). Use when user specifies a filename to answer Q&A.
 10. csv_query(filename: str, query_json_str: str) — Query a CSV file with a Pandas-compatible condition string and desired columns. Provide condition and columns inside query_json_str formatted as JSON."""
@@ -354,9 +354,9 @@ DECOMPOSE_SYSTEM = (
     "1. If the user asks about a specific Jira ticket (e.g., FSR-123, WCL-456, PROJ-789), output a 'direct' action for jira_fetch.\n"
     "2. If the user asks to SEARCH/QUERY/LIST Jira issues by criteria (e.g. 'my tasks', 'unresolved bugs', '本周更新的任务'), output a 'direct' action for jira_jql.\n"
     "3. **CONFLUENCE ROUTING (HIGH PRIORITY)**: If ANY of the following are true, output a 'direct' action for confluence_fetch:\n"
-    "   - The user mentions 'confluence' followed by a number (e.g., 'confluence 132123', 'Confluence页面 456789')\n"
-    "   - The user provides a 5+ digit numeric ID and asks to read/summarize/explain it (e.g., '132123中文总结', '总结456789', '帮我看看789012')\n"
-    "   - The user mentions a Confluence page ID explicitly (e.g., 'page 12345678')\n"
+    "   - The user mentions 'confluence' followed by a number (e.g., 'confluence 1231231233', 'Confluence页面 1234567890')\n"
+    "   - The user provides a 9-10 digit numeric ID and asks to read/summarize/explain it (e.g., '1231231233中文总结', '总结1234567890', '帮我看看1231231233')\n"
+    "   - The user mentions a Confluence page ID explicitly (e.g., 'page 1234567890')\n"
     "   - When in doubt about whether a long number is a Confluence page ID, PREFER routing to confluence_fetch\n"
     "   Use the numeric ID as the page_id argument.\n"
     "4. If the user asks to query, analyze, or read a .csv file (e.g., 'query dataset.csv for users over 30...'), output a 'direct' action for csv_query with the extracted filename and your intended query_json_str.\n"
@@ -368,7 +368,7 @@ DECOMPOSE_SYSTEM = (
     "7. Output ONLY valid JSON matching this schema:\n"
     '   - For direct: {"action": "direct", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}}\n'
     '   - For direct: {"action": "direct", "tool": "jira_jql", "args": {"query": "my unresolved tasks"}}\n'
-    '   - For direct: {"action": "direct", "tool": "confluence_fetch", "args": {"page_id": "132123"}}\n'
+    '   - For direct: {"action": "direct", "tool": "confluence_fetch", "args": {"page_id": "1231231233"}}\n'
     '   - For direct: {"action": "direct", "tool": "csv_query", "args": {"filename": "dataset.csv", "query_json_str": "{\\"condition\\": \\"Age > 30\\", \\"columns\\": [\\"Name\\"]}"}}\n'
     '   - For direct: {"action": "direct", "tool": "local_file_qa", "args": {"filename_prefix": "信用卡申请流程"}}\n'
     '   - For decompose: {"action": "decompose", "sub_queries": ["query 1", "query 2", "query 3"]}\n'
@@ -1087,18 +1087,18 @@ def _extract_hints_from_context(context_items: list[str], existing_hints: list[s
         path_matches = re.finditer(r'\[SOURCE:([^:]+)', item)
         for match in path_matches:
             hint = match.group(1).strip()
-            if hint and not hint.startswith("http") and not re.match(r'^[A-Z]+-\d+$', hint):
+            if hint and not hint.startswith("http") and not re.match(r'^[A-Z][A-Z0-9]{1,9}-\d{3,5}$', hint):
                 hints.add(hint)
                 
         # 2. Jira ticket IDs
-        jira_matches = re.finditer(r'\b([a-zA-Z][a-zA-Z0-9]*-\d+)\b', item)
+        jira_matches = re.finditer(r'\b([A-Z][A-Z0-9]{1,9}-\d{3,5})\b', item)
         for match in jira_matches:
             hints.add(match.group(1))
             
-        # 3. Confluence Page IDs (crude proxy: 5+ digit numbers that might be IDs)
+        # 3. Confluence Page IDs (crude proxy: 9-10 digit numbers that might be IDs)
         # Often they appear near words like 'page', 'confluence', 'wiki'
         # For safety we just grab exact matches of page indicators
-        page_matches = re.finditer(r'(?:page|confluence\s+id)[:\s]+(\d{5,})', item, re.IGNORECASE)
+        page_matches = re.finditer(r'(?:page|confluence\s+id)[:\s]+(\d{9,10})', item, re.IGNORECASE)
         for match in page_matches:
             hints.add(f"Confluence Page ID: {match.group(1)}")
             
@@ -1125,8 +1125,8 @@ def reflect_node(state: AgentState) -> dict[str, Any]:
     task_queue = state.get("task_queue", [])
     knowledge_gaps = state.get("knowledge_gaps", [])
     
-    JIRA_PATTERN = r'\b[a-zA-Z][a-zA-Z0-9]*-\d+\b'
-    CONFLUENCE_PATTERN = r'\b\d{9,}\b'
+    JIRA_PATTERN = r'\b[A-Z][A-Z0-9]{1,9}-\d{3,5}\b'
+    CONFLUENCE_PATTERN = r'\b\d{9,10}\b'
     CONFLUENCE_CONTEXT_HINTS = ["confluence", "頁面", "page", "wiki", "查看", "ticket", "id", "issue", "doc"]
     
     candidates = []
@@ -1399,7 +1399,7 @@ RULES:
    - If yes, output action: "search".
 3. If the user refers to something from the history (e.g., "What is the status of that Jira ticket?", "Explain it more"), you MUST resolve the pronoun/reference into a complete, standalone query (e.g., "What is the status of FSR-123?").
 4. Extract any explicit "active entities" mentioned in the current query or the strictly relevant history (e.g., Jira keys like "PROJ-123", Confluence IDs like "12345678", or specific filenames).
-5. **CONFLUENCE PAGE IDs**: If the user mentions "confluence" together with a number, or provides a 5+ digit numeric ID (e.g., "132123中文总结", "总结456789", "confluence 789012"), this ALWAYS requires "search" routing. The numeric ID is a Confluence page ID and must be included in active_entities.
+5. **CONFLUENCE PAGE IDs**: If the user mentions "confluence" together with a number, or provides a 9-10 digit numeric ID (e.g., "1231231233中文总结", "总结1234567890", "confluence 1231231233"), this ALWAYS requires "search" routing. The numeric ID is a Confluence page ID and must be included in active_entities.
 6. Output ONLY valid JSON matching this schema:
    {"route_decision": "direct" | "search", "resolved_query": "The rewritten standalone query", "active_entities": ["entity1", "entity2"]}
 7. Do NOT output any other text or explanation.
@@ -1421,11 +1421,11 @@ def analyze_and_route_node(state: AgentState) -> dict[str, Any]:
             "active_entities": [url_match.group(0)]
         }
 
-    # Fast-path for Confluence page IDs: "confluence 132123" or bare 5+ digit IDs
-    confluence_match = re.search(r'confluence\s+(\d{5,})', query, re.IGNORECASE)
+    # Fast-path for Confluence page IDs: "confluence 1231231233" or bare 9-10 digit IDs
+    confluence_match = re.search(r'confluence\s+(\d{9,10})', query, re.IGNORECASE)
     if not confluence_match:
-        # Check for bare 5+ digit numeric ID (e.g., "132123中文总结", "总结132123")
-        bare_id_match = re.search(r'(\d{5,})', query)
+        # Check for bare 9-10 digit numeric ID (e.g., "1231231233中文总结", "总结1234567890")
+        bare_id_match = re.search(r'(\d{9,10})', query)
         if bare_id_match:
             # Verify the query is short/simple enough that this is likely a Confluence ID
             # (not a complex sentence that happens to contain a large number)
@@ -1433,102 +1433,6 @@ def analyze_and_route_node(state: AgentState) -> dict[str, Any]:
             # If the query is mostly the number + some short text, treat as Confluence
             non_digit_text = re.sub(r'\d+', '', stripped).strip()
             if len(non_digit_text) <= 30:  # Short surrounding text → likely a page ID query
-                confluence_match = bare_id_match
-    
-    if confluence_match:
-        page_id = confluence_match.group(1)
-        _emit(state, "🧭", f"Rule routing: detected Confluence page ID {page_id}, routing to search.")
-        return {
-            "route_decision": "search",
-            "resolved_query": query,
-            "active_entities": [page_id]
-        }
-
-    _emit(state, "🧠", "Analyzing conversation context and routing...")
-    log_audit("agent_analyze_start", {"query": query})
-
-    llm = _build_llm()
-    messages = [SystemMessage(content=ANALYZE_AND_ROUTE_SYSTEM)]
-    messages.extend(_history_to_messages(history))
-    messages.append(HumanMessage(content=query))
-    
-    response = _invoke_and_track(llm, messages, state)
-    raw = _strip_think_tags(response.content.strip())
-    
-    parsed = _extract_json(raw)
-    
-    route_decision = "search"
-    resolved_query = query
-    active_entities = []
-    
-    if isinstance(parsed, dict):
-        route_decision = parsed.get("route_decision", "search")
-        resolved_query = parsed.get("resolved_query", query)
-        active_entities = parsed.get("active_entities", [])
-        
-    _emit(state, "🔀", f"Routing decision: {route_decision}")
-    log_audit("agent_analyze_result", {
-        "route_decision": route_decision,
-        "resolved_query": resolved_query,
-        "active_entities": active_entities
-    })
-
-    return {
-        "route_decision": route_decision,
-        "resolved_query": resolved_query,
-        "active_entities": active_entities,
-        "llm_call_count": state.get("llm_call_count", 0),
-        "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
-        "llm_completion_tokens": state.get("llm_completion_tokens", 0),
-        "llm_total_tokens": state.get("llm_total_tokens", 0),
-    }
-
-# ---------------------------------------------------------------------------
-# Node: ANALYZE AND ROUTE (New Gateway)
-# ---------------------------------------------------------------------------
-
-ANALYZE_AND_ROUTE_SYSTEM = """You are the master router for a Knowledge Base Agent.
-Your job is to analyze the user's latest question in the context of the conversation history.
-
-RULES:
-1. Determine if the question can be answered DIRECTLY from the conversation history (e.g., "Translate your last response to English", "Summarize that", "Hello").
-   - If yes, output action: "direct".
-2. Determine if the question requires searching the knowledge base or using tools.
-   - If yes, output action: "search".
-3. If the user refers to something from the history (e.g., "What is the status of that Jira ticket?", "Explain it more"), you MUST resolve the pronoun/reference into a complete, standalone query (e.g., "What is the status of FSR-123?").
-4. Extract any explicit "active entities" mentioned in the current query or the strictly relevant history (e.g., Jira keys like "PROJ-123", Confluence IDs like "12345678", or specific filenames).
-5. **CONFLUENCE PAGE IDs**: If the user mentions "confluence" together with a number, or provides a 5+ digit numeric ID (e.g., "132123中文总结", "总结456789", "confluence 789012"), this ALWAYS requires "search" routing. The numeric ID is a Confluence page ID and must be included in active_entities.
-6. Output ONLY valid JSON matching this schema:
-   {"route_decision": "direct" | "search", "resolved_query": "The rewritten standalone query", "active_entities": ["entity1", "entity2"]}
-7. Do NOT output any other text or explanation.
-"""
-
-def analyze_and_route_node(state: AgentState) -> dict[str, Any]:
-    """Analyze query and history to route to direct synthesis or tool planning."""
-    query = state["query"]
-    history = state.get("messages") or []
-    
-    # Fast-path for explicit URL fetching (legacy behavior ported)
-    import re
-    url_match = re.search(r'https?://[^\s]+', query)
-    if url_match and not history:
-        _emit(state, "🧭", "Rule routing: detected URL, routing to search.")
-        return {
-            "route_decision": "search",
-            "resolved_query": query,
-            "active_entities": [url_match.group(0)]
-        }
-
-    # Fast-path for Confluence page IDs: "confluence 132123" or bare 5+ digit IDs
-    confluence_match = re.search(r'confluence\s+(\d{5,})', query, re.IGNORECASE)
-    if not confluence_match:
-        # Check for bare 5+ digit numeric ID (e.g., "132123中文总结", "总结132123")
-        bare_id_match = re.search(r'(\d{5,})', query)
-        if bare_id_match:
-            # Verify the query is short/simple enough that this is likely a Confluence ID
-            stripped = query.strip()
-            non_digit_text = re.sub(r'\d+', '', stripped).strip()
-            if len(non_digit_text) <= 30:
                 confluence_match = bare_id_match
     
     if confluence_match:

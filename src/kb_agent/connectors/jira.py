@@ -63,7 +63,7 @@ class JiraConnector(BaseConnector):
 
         # Detect issue key pattern (e.g. ABC-123)
         import re
-        if re.match(r'^[A-Z][A-Z0-9]+-\d+$', query.strip()):
+        if re.match(r'^[A-Z][A-Z0-9]{1,9}-\d{3,5}$', query.strip()):
             return self._fetch_issue(query.strip(), force_refresh=force_refresh)
         else:
             return self._search_jql(f'text ~ "{query}" ORDER BY updated DESC')
@@ -106,9 +106,9 @@ class JiraConnector(BaseConnector):
                 import re
                 page_ids = set()
                 # 1. From description and comments
-                for m in re.finditer(r'pageId=(\d{5,})', formatted_issue["content"]):
+                for m in re.finditer(r'pageId=(\d{9,10})', formatted_issue["content"]):
                     page_ids.add(m.group(1))
-                for m in re.finditer(r'/pages/(\d{5,})', formatted_issue["content"]):
+                for m in re.finditer(r'/pages/(\d{9,10})', formatted_issue["content"]):
                     page_ids.add(m.group(1))
                 
                 # 2. From remote links
@@ -116,8 +116,8 @@ class JiraConnector(BaseConnector):
                     remote_links = jira_client.get_issue_remote_links(issue_key)
                     for rl in remote_links:
                         url = rl.get("object", {}).get("url", "")
-                        m1 = re.search(r'pageId=(\d{5,})', url)
-                        m2 = re.search(r'/pages/(\d{5,})', url)
+                        m1 = re.search(r'pageId=(\d{9,10})', url)
+                        m2 = re.search(r'/pages/(\d{9,10})', url)
                         if m1: page_ids.add(m1.group(1))
                         if m2: page_ids.add(m2.group(1))
                 except Exception as e:
@@ -274,7 +274,7 @@ JQL:"""
         confluence_links = re.findall(
             r'https?://[^\s\)\]]+/wiki/[^\s\)\]]+|'
             r'https?://[^\s\)\]]+/display/[^\s\)\]]+|'
-            r'https?://[^\s\)\]]+/pages/viewpage\.action\?pageId=\d+',
+            r'https?://[^\s\)\]]+/pages/viewpage\.action\?pageId=\d{9,10}',
             "\n".join(content_parts)
         )
         if confluence_links:
