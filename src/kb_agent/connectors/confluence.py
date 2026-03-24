@@ -12,6 +12,7 @@ from atlassian import Confluence
 
 from .base import BaseConnector
 import kb_agent.config as config
+from kb_agent.connectors.cache import APICache
 
 logger = logging.getLogger("kb_agent_audit")
 
@@ -47,7 +48,7 @@ class ConfluenceConnector(BaseConnector):
     # fetch_data — by page ID or CQL search
     # ------------------------------------------------------------------
 
-    def fetch_data(self, query: str) -> List[Dict[str, Any]]:
+    def fetch_data(self, query: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch Confluence data.
 
@@ -62,16 +63,23 @@ class ConfluenceConnector(BaseConnector):
                      "metadata": {"source": "confluence", "error": True}}]
 
         if query.strip().isdigit():
-            return self._fetch_page(query.strip())
+            return self._fetch_page(query.strip(), force_refresh=force_refresh)
         else:
             return self._search_cql(query)
 
-    def _fetch_page(self, page_id: str) -> List[Dict[str, Any]]:
+    def _fetch_page(self, page_id: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch a single Confluence page by its numeric ID."""
         if not self.confluence:
             return [{"id": page_id, "title": "Confluence not configured",
                      "content": "Confluence client is not initialized.",
                      "metadata": {"source": "confluence", "error": True}}]
+
+        cache = APICache()
+        if not force_refresh:
+            cached = cache.read("confluence", page_id)
+            if cached:
+                return [cached]
+
         try:
             page_data = self.confluence.get_page_by_id(
                 page_id,
@@ -83,7 +91,10 @@ class ConfluenceConnector(BaseConnector):
                           "content": f"Confluence page ID {page_id} does not exist or access is denied.",
                           "metadata": {"source": "confluence", "error": True}}]
                           
-            return [self._format_page(page_data)]
+            formatted_page = self._format_page(page_data)
+            cache.write("confluence", page_id, formatted_page)
+                          
+            return [formatted_page]
 
         except Exception as e:
             logger.error(f"Confluence API error for page {page_id}: {e}")
@@ -91,9 +102,9 @@ class ConfluenceConnector(BaseConnector):
                      "content": f"Failed to fetch page {page_id}: {e}",
                      "metadata": {"source": "confluence", "error": True}}]
 
-    def get_page(self, page_id: str) -> Optional[Dict[str, Any]]:
+    def get_page(self, page_id: str, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
         """Fetch a single Confluence page by its numeric ID and return formatted dict (including errors)."""
-        results = self._fetch_page(page_id)
+        results = self._fetch_page(page_id, force_refresh=force_refresh)
         return results[0] if results else None
 
     def _search_cql(self, text: str) -> List[Dict[str, Any]]:

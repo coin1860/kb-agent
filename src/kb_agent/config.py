@@ -39,6 +39,7 @@ class Settings(BaseModel):
     index_path: Optional[Path] = Field(None, description="Path to store processed/indexed docs")
     archive_path: Optional[Path] = Field(None, description="Path to archive processed docs")
     audit_log_path: Optional[Path] = Field(None, description="Path to the audit log file")
+    cache_path: Optional[Path] = Field(None, description="Path for caching external connector data")
 
     # Proxy
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
@@ -73,6 +74,9 @@ class Settings(BaseModel):
             if not self.archive_path:
                 self.archive_path = Path.home() / ".kb-agent" / "archive"
                 
+        if not self.cache_path:
+            self.cache_path = (self.data_folder / "cache") if self.data_folder else (Path.home() / ".kb-agent" / "cache")
+
         if not self.audit_log_path:
             self.audit_log_path = Path("audit.log")
 

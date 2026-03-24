@@ -1117,6 +1117,9 @@ def reflect_node(state: AgentState) -> dict[str, Any]:
     _emit(state, "🕵️", "Reflecting on evidence to extract precise entity IDs...")
     
     context_str = "\n".join(state.get("context", []))
+    # Strip out non-extractable sections cleanly before regex match
+    context_str = re.sub(r'<!-- NO_ENTITY_EXTRACT -->.*?<!-- /NO_ENTITY_EXTRACT -->', '', context_str, flags=re.DOTALL)
+    
     attempted_task_ids = state.get("attempted_task_ids", [])
     discovered_entities = state.get("discovered_entities", [])
     task_queue = state.get("task_queue", [])

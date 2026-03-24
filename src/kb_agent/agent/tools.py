@@ -208,7 +208,7 @@ def graph_related(entity_id: str) -> str:
 
 
 @tool
-def jira_fetch(issue_key: str) -> str:
+def jira_fetch(issue_key: str, force_refresh: bool = False) -> str:
     """Fetch a Jira issue by its key (e.g. PROJ-123) or search Jira with text.
 
     Use this when the user asks about a specific Jira ticket or wants to search
@@ -216,11 +216,12 @@ def jira_fetch(issue_key: str) -> str:
 
     Args:
         issue_key: The Jira issue key (e.g. 'PROJ-123') or search text.
+        force_refresh: If True, bypass the local cache and fetch fresh data from the API. Use when the user explicitly asks to "refresh cache" or "刷新缓存".
 
     Returns:
         JSON with id, title, content, and metadata of the issue(s).
     """
-    results = _get_jira().fetch_data(issue_key)
+    results = _get_jira().fetch_data(issue_key, force_refresh=force_refresh)
     return json.dumps(results, ensure_ascii=False)
 
 
@@ -244,7 +245,7 @@ def jira_jql(query: str) -> str:
 
 
 @tool
-def confluence_fetch(page_id: str) -> str:
+def confluence_fetch(page_id: str, force_refresh: bool = False) -> str:
     """Fetch a Confluence page by its numeric ID or search for pages by text.
 
     Use this tool when:
@@ -257,11 +258,12 @@ def confluence_fetch(page_id: str) -> str:
 
     Args:
         page_id: Confluence page ID (numeric, e.g. '132123') or search text.
+        force_refresh: If True, bypass the local cache and fetch fresh data from the API. Use when the user explicitly asks to "refresh cache" or "刷新缓存".
 
     Returns:
         JSON with id, title, content, and metadata of the page(s).
     """
-    results = _get_confluence().fetch_data(page_id)
+    results = _get_confluence().fetch_data(page_id, force_refresh=force_refresh)
     return json.dumps(results, ensure_ascii=False)
 
 

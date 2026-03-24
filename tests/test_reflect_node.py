@@ -90,3 +90,36 @@ def test_reflect_node_exhaustion():
     assert result["reflection_verdict"] == "exhausted"
     assert len(result["knowledge_gaps"]) == 1
     assert "FSR-123" in result["knowledge_gaps"][0]
+
+
+def test_reflect_node_extraction_markers():
+    # Content with markers
+    context = [
+        "Please look at FSR-444 (active).",
+        "<!-- NO_ENTITY_EXTRACT -->\nSub-tasks:\n- FSR-555 (hidden)\n- 123456789 (hidden confluence)\n<!-- /NO_ENTITY_EXTRACT -->",
+        "Also see TTP-101 (active)."
+    ]
+    state: AgentState = {
+        "query": "test",
+        "context": context,
+        "attempted_task_ids": [],
+        "discovered_entities": [],
+        "task_queue": [],
+        "knowledge_gaps": [],
+        "iteration": 1,
+        "grader_action": "REFINE",
+    }
+    
+    result = reflect_node(state)
+    
+    task_ids = [t["id"] for t in result["task_queue"]]
+    
+    # Should find outside markers
+    assert "jira:FSR-444" in task_ids
+    assert "jira:TTP-101" in task_ids
+    
+    # Should NOT find inside markers
+    assert "jira:FSR-555" not in task_ids
+    assert "confluence:123456789" not in task_ids
+    
+    assert len(result["task_queue"]) == 2

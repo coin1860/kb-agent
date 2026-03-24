@@ -133,3 +133,100 @@ def test_confluence_not_configured(mock_settings):
     assert page is not None
     assert page["metadata"]["error"] is True
     assert "not configured" in page["title"].lower()
+
+
+@patch("kb_agent.connectors.jira.Jira")
+@patch("kb_agent.config.settings")
+@patch.object(APICache, "read", return_value=None)
+@patch.object(APICache, "write")
+def test_jira_connector_comments_and_markers(mock_write, mock_read, mock_settings, mock_jira_class):
+    mock_settings.jira_url = "http://jira.test"
+    mock_settings.jira_token.get_secret_value.return_value = "test-token"
+    mock_jira_inst = MagicMock()
+    mock_jira_class.return_value = mock_jira_inst
+    
+    # Mock issue data
+    mock_jira_inst.issue.return_value = {
+        "key": "PROJ-123",
+        "fields": {
+            "summary": "Test Issue",
+            "status": {"name": "Open"},
+            "description": "Some description with JRA-101",
+            "issuetype": {"name": "Bug"},
+            "priority": {"name": "High"},
+            "subtasks": [{"fields": {"summary": "Subtask 1", "status": {"name": "Done"}}}],
+            "issuelinks": []
+        }
+    }
+    
+    # Mock comments
+    mock_jira_inst.issue_get_comments.return_value = {
+        "comments": [
+            {"author": {"displayName": "User A"}, "created": "2023-01-01", "body": "First comment"},
+            {"author": {"displayName": "User B"}, "created": "2023-01-02", "body": "Second comment"}
+        ]
+    }
+    
+    connector = JiraConnector()
+    issue = connector.get_issue("PROJ-123")
+    
+    assert issue is not None
+    content = issue["content"]
+    
+    # Check comments
+    assert "## Comments" in content
+    assert "First comment" in content
+    assert "Second comment" in content
+    
+    # Check markers
+    assert "<!-- NO_ENTITY_EXTRACT -->" in content
+    assert "<!-- /NO_ENTITY_EXTRACT -->" in content
+    assert "Subtask 1" in content
+
+
+@patch("kb_agent.connectors.jira.Jira")
+@patch("kb_agent.connectors.confluence.ConfluenceConnector")
+@patch("kb_agent.config.settings")
+@patch.object(APICache, "read", return_value=None)
+@patch.object(APICache, "write")
+def test_jira_connector_proactive_confluence(mock_write, mock_read, mock_settings, mock_conf_conn_class, mock_jira_class):
+    mock_settings.jira_url = "http://jira.test"
+    mock_settings.jira_token.get_secret_value.return_value = "test-token"
+    mock_jira_inst = MagicMock()
+    mock_jira_class.return_value = mock_jira_inst
+    
+    # Mock issue with confluence link in description
+    mock_jira_inst.issue.return_value = {
+        "key": "PROJ-123",
+        "fields": {
+            "summary": "Test Issue",
+            "description": "See https://wiki.test/pages/123456789",
+            "status": {"name": "Open"},
+            "issuetype": {"name": "Bug"},
+            "priority": {"name": "High"}
+        }
+    }
+    mock_jira_inst.issue_get_comments.return_value = {"comments": []}
+    mock_jira_inst.get_issue_remote_links.return_value = []
+    
+    # Mock ConfluenceConnector
+    mock_conf_conn = MagicMock()
+    mock_conf_conn_class.return_value = mock_conf_conn
+    mock_conf_conn._is_configured = True
+    mock_conf_conn.fetch_data.return_value = [{
+        "id": "123456789",
+        "title": "Conf Page Title",
+        "content": "Secret Confluence Content",
+        "metadata": {"source": "confluence"}
+    }]
+    
+    connector = JiraConnector()
+    issue = connector.get_issue("PROJ-123")
+    
+    assert issue is not None
+    assert "## Inline Confluence Content" in issue["content"]
+    assert "Conf Page Title" in issue["content"]
+    assert "Secret Confluence Content" in issue["content"]
+    
+    # Verify fetch_data was called for the page ID
+    mock_conf_conn.fetch_data.assert_called_with("123456789", force_refresh=False)

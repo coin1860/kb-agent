@@ -70,7 +70,8 @@ class JiraConnector(BaseConnector):
 
     def _fetch_issue(self, issue_key: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Fetch a single Jira issue by key."""
-        if not self.jira:
+        jira_client = self.jira
+        if not jira_client:
             return [{"id": issue_key, "title": "Jira not configured",
                      "content": "Jira client is not initialized.",
                      "metadata": {"source": "jira", "error": True}}]
@@ -82,15 +83,60 @@ class JiraConnector(BaseConnector):
                 return [cached]
 
         try:
-            issue_data = self.jira.issue(issue_key, expand="renderedFields")
+            issue_data = jira_client.issue(issue_key, expand="renderedFields")
             if not issue_data:
                 return [{"id": issue_key, "title": f"Issue {issue_key} not found",
                          "content": f"Jira issue {issue_key} does not exist or access is denied.",
                          "metadata": {"source": "jira", "error": True}}]
                          
-            formatted_issue = self._format_issue(issue_data)
+            comments_data = {}
+            try:
+                comments_data = jira_client.issue_get_comments(issue_key)
+            except Exception as e:
+                logger.warning(f"Failed to fetch comments for {issue_key}: {e}")
+            comments = comments_data.get("comments", []) if comments_data else []
+
+            formatted_issue = self._format_issue(issue_data, comments=comments)
             
-            # Cache the main issue
+            # --- Inline Confluence Fetching ---
+            from kb_agent.connectors.confluence import ConfluenceConnector
+            confluence_connector = ConfluenceConnector()
+            if confluence_connector._is_configured:
+                # Extract page IDs
+                import re
+                page_ids = set()
+                # 1. From description and comments
+                for m in re.finditer(r'pageId=(\d{5,})', formatted_issue["content"]):
+                    page_ids.add(m.group(1))
+                for m in re.finditer(r'/pages/(\d{5,})', formatted_issue["content"]):
+                    page_ids.add(m.group(1))
+                
+                # 2. From remote links
+                try:
+                    remote_links = jira_client.get_issue_remote_links(issue_key)
+                    for rl in remote_links:
+                        url = rl.get("object", {}).get("url", "")
+                        m1 = re.search(r'pageId=(\d{5,})', url)
+                        m2 = re.search(r'/pages/(\d{5,})', url)
+                        if m1: page_ids.add(m1.group(1))
+                        if m2: page_ids.add(m2.group(1))
+                except Exception as e:
+                    logger.warning(f"Failed to fetch remote links for {issue_key}: {e}")
+
+                if page_ids:
+                    formatted_issue["content"] += "\n\n## Inline Confluence Content"
+                    for pid in list(page_ids)[:3]:  # Limit to 3 Confluence pages to prevent context bloat
+                        try:
+                            # Fetch page content directly using its ID
+                            page_results = confluence_connector.fetch_data(pid, force_refresh=force_refresh)
+                            if page_results and not page_results[0].get("metadata", {}).get("error"):
+                                pc = page_results[0].get("content", "")
+                                title = page_results[0].get("title", pid)
+                                formatted_issue["content"] += f"\n\n### Linked Confluence Page: {title}\n{pc}"
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch Confluence page {pid}: {e}")
+            
+            # Cache the main issue with all included context
             cache.write("jira", issue_key, formatted_issue)
                     
             return [formatted_issue]
@@ -177,7 +223,7 @@ JQL:"""
     # Helpers
     # ------------------------------------------------------------------
 
-    def _format_issue(self, data: dict) -> Dict[str, Any]:
+    def _format_issue(self, data: dict, comments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Format a raw Jira issue JSON into our standard format."""
         fields = data.get("fields", {})
         rendered = data.get("renderedFields", {})
@@ -212,13 +258,24 @@ JQL:"""
         content_parts.append("## Description")
         content_parts.append(description or "(No description)")
         
+        if comments:
+            content_parts.append("\n## Comments")
+            recent_comments = comments[-10:] # last 10 comments
+            for c in reversed(recent_comments):
+                author = c.get("author", {}).get("displayName", "Unknown")
+                created = c.get("created", "")
+                body = c.get("body", "")
+                if "<" in body and ">" in body:
+                    body = md(body, strip=["img"])
+                content_parts.append(f"**From {author} at {created}:**\n{body}\n")
+
         # --- Extract Confluence links from description ---
         import re
         confluence_links = re.findall(
             r'https?://[^\s\)\]]+/wiki/[^\s\)\]]+|'
             r'https?://[^\s\)\]]+/display/[^\s\)\]]+|'
             r'https?://[^\s\)\]]+/pages/viewpage\.action\?pageId=\d+',
-            description
+            "\n".join(content_parts)
         )
         if confluence_links:
             content_parts.append("\n## Referenced Confluence Pages")
@@ -231,16 +288,19 @@ JQL:"""
         # --- Sub-tasks (NO keys exposed) ---
         subtasks = fields.get("subtasks", [])
         if subtasks:
-            content_parts.append(f"\n## Sub-Tasks ({len(subtasks)} total)")
+            content_parts.append("\n<!-- NO_ENTITY_EXTRACT -->")
+            content_parts.append(f"## Sub-Tasks ({len(subtasks)} total)")
             for st in subtasks:
                 st_summary = st.get("fields", {}).get("summary", "")
                 st_status = st.get("fields", {}).get("status", {}).get("name", "")
                 content_parts.append(f"- {st_summary} ({st_status})")
+            content_parts.append("<!-- /NO_ENTITY_EXTRACT -->")
 
         # --- Related Issues (no keys in content) ---
         issuelinks = fields.get("issuelinks", [])
         if issuelinks:
-            content_parts.append("\n## Related Issues")
+            content_parts.append("\n<!-- NO_ENTITY_EXTRACT -->")
+            content_parts.append("## Related Issues")
             for link in issuelinks:
                 link_type = link.get("type", {})
                 if "outwardIssue" in link:
@@ -254,6 +314,7 @@ JQL:"""
                 ls = linked.get("fields", {}).get("summary", "")
                 lst = linked.get("fields", {}).get("status", {}).get("name", "")
                 content_parts.append(f"- {relation}: {ls} ({lst})")
+            content_parts.append("<!-- /NO_ENTITY_EXTRACT -->")
 
         return {
             "id": issue_key,
