@@ -245,6 +245,25 @@ def jira_jql(query: str) -> str:
 
 
 @tool
+def confluence_create_page(parent_id: str, title: str, content: str) -> str:
+    """Create a new Confluence page as a child of an existing page.
+
+    Use this tool when you need to upload content, create a new document, or 
+    add a meeting summary to Confluence.
+
+    Args:
+        parent_id: The numeric ID of the parent page (e.g. '123123123').
+        title: The title for the new page.
+        content: The Markdown content to be uploaded.
+
+    Returns:
+        JSON with the details of the newly created page.
+    """
+    results = _get_confluence().create_page(parent_id, title, content)
+    return json.dumps(results, ensure_ascii=False)
+
+
+@tool
 def confluence_fetch(page_id: str, force_refresh: bool = False) -> str:
     """Fetch a Confluence page by its numeric ID or search for pages by text.
 
@@ -313,6 +332,20 @@ def local_file_qa(filename_prefix: str) -> str:
 
 
 @tool
+def summary(text: str) -> str:
+    """Use natural language to reply to the user based on the original question and the results of previous actions.
+    
+    Use this tool for internal reasoning, summarizing meeting minutes, 
+    categorizing information, or synthesizing tool results to form a final answer.
+    
+    Args:
+        text: The content/results to be summarized or analyzed.
+    """
+    return text  # The executor's reflection/summary logic will handle the actual summarization.
+
+
+
+@tool
 def csv_info(filename: str) -> str:
     """Get the schema and a small sample of a CSV file.
 
@@ -355,8 +388,46 @@ ALL_TOOLS = [
     jira_fetch,
     jira_jql,
     confluence_fetch,
+    confluence_create_page,
     web_fetch,
     local_file_qa,
     csv_info,
-    csv_query
+    csv_query,
+    summary
 ]
+
+# NOTE: Cannot set arbitrary attributes on Pydantic StructuredTool objects.
+# Instead, use SKILL_TOOL_APPROVAL_REGISTRY to track which tools need approval.
+# The registry is keyed by tool.name (the string name of the @tool function).
+
+SKILL_TOOL_APPROVAL_REGISTRY: dict[str, bool] = {}
+# All RAG tools default to False; overridden for write_file and run_python when loaded.
+for _t in ALL_TOOLS:
+    SKILL_TOOL_APPROVAL_REGISTRY[_t.name] = False
+
+
+def _get_write_file():
+    from kb_agent.tools.atomic.file_ops import write_file as _wf
+    SKILL_TOOL_APPROVAL_REGISTRY[_wf.name] = True
+    return _wf
+
+
+def _get_run_python():
+    from kb_agent.tools.atomic.code_exec import run_python as _rp
+    SKILL_TOOL_APPROVAL_REGISTRY[_rp.name] = True
+    return _rp
+
+
+def get_skill_tools():
+    """Return the full tool list for the skill agent (ALL_TOOLS + atomic write tools)."""
+    return ALL_TOOLS + [_get_write_file(), _get_run_python()]
+
+
+def tool_requires_approval(tool) -> bool:
+    """Return True if the given tool requires user approval before execution."""
+    return SKILL_TOOL_APPROVAL_REGISTRY.get(getattr(tool, 'name', ''), False)
+
+
+# Static reference for imports that need the list at module load time
+# (lazy so atomic tools don't load unless skill mode is used)
+SKILL_TOOLS = None  # Use get_skill_tools() at runtime
