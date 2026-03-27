@@ -1,8 +1,18 @@
 """
 Skill planner — generates and revises execution plans using the LLM.
 
-Plans are lists of PlanStep objects, each specifying a tool call with
-whether it requires user approval before execution.
+Two-layer architecture:
+- Milestone Planner (high-level): plan_milestones() decomposes a user command into an
+  ordered list of coarse, verifiable Milestone objects in a single LLM call. The prompt
+  intentionally omits tool names — it reasons about *goals*, not *how*.
+- Step Executor (low-level): decide_next_step() selects one tool per iteration within a
+  milestone sub-loop. When called with milestone_goal/prior_context it focuses on the
+  current milestone only, keeping context bounded regardless of task length.
+
+Legacy / compatibility:
+- Static (legacy): generate_plan() produces a full ordered list of PlanStep objects.
+- Dynamic (legacy flat): decide_next_step() without milestone params reproduces old flat loop.
+- preview_intent() for upfront intent summary before execution.
 """
 
 from __future__ import annotations
@@ -11,7 +21,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -21,18 +31,18 @@ from .session import Session
 
 logger = logging.getLogger(__name__)
 
-APPROVAL_TOOLS = {"write_file", "run_python"}
+APPROVAL_TOOLS = {"write_file", "run_python", "confluence_create_page", "confluence_update_page"}
 
 SKILL_TOOLS_DESCRIPTION = """\
 Available tools (with approval requirement):
 1. vector_search(query: str) — Semantic search over ChromaDB knowledge base. [no approval]
-   ⚠️  SUPPRESSED BY DEFAULT. Use ONLY when a user question cannot be answered directly
-   AND requires semantic retrieval of documents. Do NOT use for greetings or simple chitchat.
+   ⚠️  Use descriptive natural language (e.g. 'Information about Shane\\'s role and projects') rather than keywords like 'Shane'. 
+   Use ONLY when a user question cannot be answered directly and requires semantic retrieval.
 2. read_file(file_path: str) — Read a local file by path. [no approval]
 3. jira_fetch(issue_key: str) — Fetch a Jira ticket by key (e.g. PROJ-123). [no approval]
 4. jira_jql(query: str) — Search Jira using natural language query. [no approval]
 5. confluence_fetch(page_id: str) — Fetch a Confluence page by ID. [no approval]
-6. confluence_create_page(parent_id: str, title: str, content: str) — Create a new Confluence page. [no approval]
+6. confluence_create_page(parent_id: str, title: str, content: str) — Create a new Confluence page. [REQUIRES APPROVAL]
 7. web_fetch(url: str) — Fetch a web page and convert to Markdown. [no approval]
 8. local_file_qa(filename_prefix: str) — Read a local file from datastore. [no approval]
 9. csv_info(filename: str) — Get CSV schema and sample. [no approval]
@@ -41,9 +51,9 @@ Available tools (with approval requirement):
     mode: 'create' | 'overwrite' | 'append' | 'delete'. [REQUIRES APPROVAL]
 12. run_python(script_path: str, timeout_seconds: int=60) — Execute a Python script. [REQUIRES APPROVAL]
 13. rag_query(query: str) — Full RAG pipeline query over the knowledge base (semantic search + synthesis).
-    [no approval] ⚠️  SUPPRESSED BY DEFAULT. ONLY use this tool when the user explicitly mentions RAG,
-    e.g. "用RAG查", "RAG查询", "search knowledge base", "知识库搜索". Do NOT use for general questions,
-    coding tasks, writing files, or anything that does not explicitly request RAG retrieval.
+    [no approval] ⚠️  Use a complete, descriptive question in natural language. ONLY use this tool when the
+    user explicitly mentions RAG or knowledge base search. Do NOT use for general questions
+    that do not explicitly request RAG retrieval.
 14. direct_response(answer: str) — Respond directly to the user with a message or chitchat.
     Use this for greetings, simple pleasantries, or questions you can answer without any external data.
 """
@@ -68,7 +78,7 @@ OUTPUT: Return ONLY a JSON array of steps. Each step MUST have these exact field
 Rules:
 - IF a skill playbook is provided, your execution plan SHOULD follow its logic, but you MUST NOT create separate steps for internal reasoning/summarization.
 - Perform any required reasoning (like summarization or analysis) directly within the argument resolution of the tool call that needs it (e.g., generate the summary in the 'content' field of 'write_file').
-- requires_approval MUST be true for write_file and run_python, false for all others
+- requires_approval MUST be true for write_file, run_python, and Confluence write tools, false for all others
 - Keep steps atomic — focus on physical tool actions (write, fetch, create)
 - Use the run_id '{run_id}' in 'python_code/' paths (e.g. 'python_code/{run_id}/step_1.py')
 - For file outputs, use 'output/' prefix (e.g. 'output/report.md')
@@ -108,6 +118,20 @@ class PlanStep:
             "args": self.args,
             "requires_approval": self.requires_approval,
         }
+
+
+@dataclass
+class Milestone:
+    """
+    A coarse, verifiable goal produced by the Milestone Planner.
+
+    goal            — human-readable objective (what to achieve)
+    expected_output — observable completion signal (what constitutes "done")
+    iteration_budget — max tool calls allowed for this milestone's sub-loop
+    """
+    goal: str
+    expected_output: str
+    iteration_budget: int = 3
 
 
 def _parse_plan(raw: str) -> list[PlanStep]:
@@ -268,3 +292,430 @@ def replan(
         logger.error("Replan failed: %s", e)
 
     return remaining_steps  # Fall back to existing plan on failure
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Milestone Planner — high-level goal decomposition
+# ─────────────────────────────────────────────────────────────────────────────
+
+UNIFIED_PLANNER_SYSTEM = """\
+You are a task analysis and planning agent. Given a user command and a list of available skills, perform routing, intent preview, and milestone planning in a single step.
+
+Available skills:
+{skill_index}
+
+Task Types (Routes):
+- chitchat: Greetings, pleasantries, or simple questions answerable without tools.
+- skill: The command's intent matches one of the available skills.
+- free_agent: The command requires tools/actions but does not match any specific skill.
+
+Intent Preview:
+Provide a 1-2 sentence summary of what you plan to do, and determine if the task requires sensitive write operations (writing files or running code).
+
+Milestone Planning (only if route is 'skill' or 'free_agent'):
+Decompose the task into an ordered list of 1-5 coarse, verifiable milestones before any tools are called. Each milestone describes a GOAL and an EXPECTED OUTPUT.
+- Each milestone MUST capture a distinct phase of environmental interaction (fetching, querying, writing, executing).
+- If the user specifies a specific technical method (e.g., "use Python", "run a script", "search Jira"), the milestone GOAL MUST explicitly include that requirement (e.g. "Execute Python code to...") to prevent the executor from skipping it.
+- Do NOT list individual tool calls, but DO capture the major technical actions requested by the user.
+- 1-2 milestones for fetch + write workflows
+- Up to 5 for complex multi-phase tasks
+- iteration_budget: 1 for simple read-only lookups.
+- iteration_budget: 2-3 for simple write/execute tasks.
+- iteration_budget: 4-6 for complex analysis, multi-file edits, or tasks with potential retries.
+
+OUTPUT: Return ONLY a JSON object with this exact schema:
+{{
+  "route": "chitchat" | "skill" | "free_agent",
+  "skill_id": "<skill name or null>",
+  "summary": "<intent summary>",
+  "has_write_ops": <true or false>,
+  "milestones": [
+    {{
+      "goal": "<objective>",
+      "expected_output": "<completion signal>",
+      "iteration_budget": <int, 1-6>
+    }}
+  ]
+}}
+"""
+
+
+
+def _parse_milestones(raw: str, default_budget: int = 3) -> list[Milestone]:
+    """Parse LLM response into a list of Milestone objects.
+
+    Mirrors the _parse_plan() pattern: strips think tags, code fences, then
+    extracts the first JSON array.
+    """
+    # Strip think tags
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+    # Strip code fences
+    if "```" in cleaned:
+        parts = cleaned.split("```")
+        if len(parts) >= 3:
+            fenced = parts[1]
+            if fenced.startswith("json"):
+                fenced = fenced[4:]
+            cleaned = fenced.strip()
+
+    # Find JSON array
+    start = cleaned.find("[")
+    data: list = []
+    if start != -1:
+        depth = 0
+        for i in range(start, len(cleaned)):
+            if cleaned[i] == "[":
+                depth += 1
+            elif cleaned[i] == "]":
+                depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(cleaned[start:i + 1])
+                except json.JSONDecodeError:
+                    pass
+                break
+
+    milestones = []
+    for item in data:
+        if not isinstance(item, dict) or "goal" not in item:
+            continue
+        milestones.append(Milestone(
+            goal=item.get("goal", ""),
+            expected_output=item.get("expected_output", ""),
+            iteration_budget=int(item.get("iteration_budget", default_budget)),
+        ))
+    return milestones
+
+
+@dataclass
+class UnifiedPlanResponse:
+    route: str
+    skill_id: Optional[str]
+    summary: str
+    has_write_ops: bool
+    milestones: list[Milestone]
+
+def generate_unified_plan(
+    command: str,
+    session: Session,
+    skills: dict[str, SkillDef],
+    llm,
+    default_budget: int = 3,
+) -> UnifiedPlanResponse:
+    """
+    Unified function addressing: Intent routing, Intent preview, and Milestone Planning.
+    """
+    from .router import _build_skill_index
+    skill_index = _build_skill_index(skills)
+    
+    system_prompt = UNIFIED_PLANNER_SYSTEM.format(skill_index=skill_index)
+    user_msg = f"User command: {command}"
+
+    log_audit("unified_plan_start", {"command": command[:200]})
+
+    fallback = UnifiedPlanResponse(
+        route="free_agent",
+        skill_id=None,
+        summary=command,
+        has_write_ops=False,
+        milestones=[Milestone(goal=command, expected_output="Task completed", iteration_budget=default_budget)]
+    )
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_msg),
+        ])
+        raw = response.content.strip()
+        
+        # Strip think tags
+        cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        if "```" in cleaned:
+            parts = cleaned.split("```")
+            if len(parts) >= 3:
+                fenced = parts[1]
+                if fenced.startswith("json"):
+                    fenced = fenced[4:]
+                cleaned = fenced.strip()
+
+        # Find JSON object
+        start = cleaned.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(cleaned)):
+                if cleaned[i] == "{":
+                    depth += 1
+                elif cleaned[i] == "}":
+                    depth -= 1
+                if depth == 0:
+                    data = json.loads(cleaned[start:i + 1])
+                    break
+            else:
+                data = {}
+        else:
+            data = {}
+
+        if not isinstance(data, dict):
+            return fallback
+
+        route = data.get("route", "free_agent")
+        skill_id = data.get("skill_id")
+        summary = data.get("summary", command)
+        has_write_ops = data.get("has_write_ops", False)
+        
+        milestones = []
+        for ms in data.get("milestones", []):
+            if isinstance(ms, dict) and "goal" in ms:
+                milestones.append(Milestone(
+                    goal=ms.get("goal", ""),
+                    expected_output=ms.get("expected_output", ""),
+                    iteration_budget=int(ms.get("iteration_budget", default_budget)),
+                ))
+        
+        if not milestones and route != "chitchat":
+            milestones = fallback.milestones
+
+        return UnifiedPlanResponse(
+            route=route,
+            skill_id=skill_id,
+            summary=summary,
+            has_write_ops=has_write_ops,
+            milestones=milestones
+        )
+
+    except Exception as e:
+        logger.error("unified_plan failed: %s", e)
+        return fallback
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic decision loop helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+DECIDE_NEXT_STEP_SYSTEM = """\
+You are a step-by-step task executor. Decide ONE action at a time.
+
+You are given:
+- The user's original command
+- (Optional) The CURRENT MILESTONE GOAL — your sole focus for this sub-loop
+- (Optional) Prior milestone context — compressed summaries of already-completed milestones
+- Optional skill playbook steps (HARD CONSTRAINTS — follow them in order, do not skip)
+- History of tool calls already executed (with their results)
+- Current iteration number and maximum allowed iterations
+
+{tools_section}
+
+Rules:
+- If a CURRENT MILESTONE GOAL is provided, focus ONLY on achieving that goal — do not
+  attempt work belonging to other milestones
+- ALWAYS output final_answer if the CURRENT MILESTONE GOAL is fully achieved (e.g., you have successfully called the necessary tools and observed the results).
+- You MUST call tools to interact with the environment (e.g., read, search, write files, execute code). Do NOT hallucinate task completion.
+- For action-oriented goals (writing, running code, etc.), the milestone is NEVER achieved until the corresponding tool has been successfully executed. Even if you "know" the answer, you must perform the physical action requested (e.g., if asked to use Python to calculate 2x2, you MUST write and run Python, not just answer 4).
+- When using semantic search tools (vector_search, rag_query, jira_jql), ALWAYS use descriptive natural language queries (e.g., "Find information about Shane's roles and projects") instead of single keywords (e.g., "Shane").
+- If a skill playbook is provided, you MUST execute its steps in order without skipping
+- Do NOT call the same tool with identical args twice (check history)
+- If iteration >= max_iterations, you MUST output final_answer immediately (even partial)
+- Use the run_id '{run_id}' in 'python_code/' paths (e.g. 'python_code/{run_id}/step_1.py')
+- For file outputs, use 'output/' prefix (e.g. 'output/report.md')
+- For temporary intermediate files, use 'temp/' prefix (e.g. 'temp/data.json')
+- If you need to execute Python code, you MUST FIRST use 'write_file' to save the script before using 'run_python' to execute it.
+- Ensure all required files exist (via write_file or previous tool outputs) before they are used as arguments in subsequent tool calls.
+- Include a brief "reason" field explaining why you chose this action
+
+OUTPUT: Return ONLY valid JSON — one of:
+{{"action": "call_tool", "tool": "<tool_name>", "args": {{...}}, "reason": "<why>", "finish_milestone": <true/false>}}
+{{"action": "final_answer", "answer": "<full answer to user>"}}
+
+Do NOT include any text outside the JSON.
+"""
+
+PREVIEW_INTENT_SYSTEM = """\
+You are a task preview assistant. Given a user command, generate a brief summary
+of what you plan to do, and whether any SENSITIVE write operations will be needed.
+
+SENSITIVE operations requiring approval are:
+- writing/deleting files (write_file tool)
+- executing python scripts (run_python tool)
+
+Non-sensitive operations:
+- any read-only lookup or search
+- providing a direct natural-language response/summary to the user
+
+OUTPUT: Return ONLY valid JSON:
+{"summary": "<1-2 sentence human-readable plan summary>", "has_write_ops": <true|false>}
+
+Do NOT include any text outside the JSON.
+"""
+
+
+def _build_tool_history_str(tool_history: list[dict[str, Any]]) -> str:
+    """Format tool_history list into a readable string for the LLM prompt."""
+    if not tool_history:
+        return "(none)"
+    parts = []
+    for entry in tool_history:
+        step = entry.get("step", "?")
+        tool = entry.get("tool", "?")
+        args_str = json.dumps(entry.get("args", {}), ensure_ascii=False)[:200]
+        result = str(entry.get("result", ""))[:2000]
+        status = entry.get("status", "?")
+        parts.append(f"Step {step} [{status}]: {tool}({args_str})\nResult: {result}")
+    return "\n\n".join(parts)
+
+
+def decide_next_step(
+    command: str,
+    session: Session,
+    llm,
+    skill_def: Optional[SkillDef] = None,
+    tool_history: Optional[list[dict[str, Any]]] = None,
+    iteration: int = 1,
+    max_iterations: int = 3,
+    milestone_goal: Optional[str] = None,
+    prior_context: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Ask the LLM to decide the single next action based on command + history.
+
+    Returns one of:
+      {"action": "call_tool",    "tool": str, "args": dict, "reason": str}
+      {"action": "final_answer", "answer": str}
+    """
+    tool_history = tool_history or []
+
+    # Build system prompt
+    system_prompt = DECIDE_NEXT_STEP_SYSTEM.format(
+        tools_section=SKILL_TOOLS_DESCRIPTION,
+        run_id=session.run_id,
+    )
+
+    # Build user message
+    parts = [f"User command: {command}"]
+
+    # Inject current milestone goal (focuses executor on sub-task)
+    if milestone_goal:
+        parts.append(
+            f"\n🎯 CURRENT MILESTONE GOAL (focus ONLY on this):\n{milestone_goal}"
+        )
+
+    # Inject compressed summaries of completed prior milestones
+    if prior_context:
+        parts.append(
+            f"\n📋 Prior milestone context (already completed — do NOT redo this work):\n{prior_context}"
+        )
+
+    # Inject skill playbook as hard constraint
+    if skill_def:
+        expanded = expand_skill_content(skill_def)
+        parts.append(
+            f"\n⚠️  SKILL PLAYBOOK HARD CONSTRAINT — you MUST follow these steps in order:\n"
+            f"Playbook '{skill_def.name}':\n{expanded}"
+        )
+
+    parts.append(f"\nRun ID for file paths: {session.run_id}")
+    parts.append(f"\nIteration: {iteration} / {max_iterations}")
+
+    history_str = _build_tool_history_str(tool_history)
+    parts.append(f"\nTool history so far:\n{history_str}")
+
+    if iteration > max_iterations:
+        parts.append(
+            "\n🚨 MAX ITERATIONS REACHED. You MUST output final_answer now, "
+            "even if your answer is partial. Do not call any more tools."
+        )
+
+    user_msg = "\n".join(parts)
+
+    log_audit("skill_decide_start", {
+        "command": command[:200],
+        "iteration": iteration,
+        "history_len": len(tool_history),
+    })
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_msg),
+        ])
+        raw = response.content.strip()
+        # Strip think tags
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        # Strip code fences
+        if "```" in raw:
+            parts_list = raw.split("```")
+            if len(parts_list) >= 3:
+                fenced = parts_list[1]
+                if fenced.startswith("json"):
+                    fenced = fenced[4:]
+                raw = fenced.strip()
+
+        action = json.loads(raw)
+        if not isinstance(action, dict) or "action" not in action:
+            raise ValueError(f"Unexpected decide_next_step response shape: {action}")
+
+        log_audit("skill_decide_result", {"action": action.get("action"), "tool": action.get("tool")})
+        return action
+
+    except Exception as e:
+        logger.error("decide_next_step failed (iter %d): %s", iteration, e)
+        return {
+            "action": "final_answer",
+            "answer": f"Sorry, I encountered an error while planning your request: {command}",
+        }
+
+
+def preview_intent(
+    command: str,
+    skill_def: Optional[SkillDef] = None,
+    llm=None,
+) -> dict[str, Any]:
+    """
+    Generate a brief intent summary for upfront user approval.
+
+    - If skill_def is provided: derive summary from playbook steps (no LLM call).
+    - Otherwise: make a lightweight LLM call to produce the summary.
+
+    Returns: {"summary": str, "has_write_ops": bool}
+    """
+    if skill_def:
+        # Derive from playbook without calling LLM
+        expanded = expand_skill_content(skill_def)
+        # Extract step titles if available, else summarise
+        lines = [line.strip() for line in expanded.splitlines() if line.strip()]
+        step_lines: list[str] = [l for l in lines if l.startswith(("step", "Step", "-", "*", "1.", "2.", "3."))]
+        summary_body = "\n".join(step_lines[:6]) if step_lines else expanded[:300]
+        has_write_ops = any(
+            tool in expanded for tool in APPROVAL_TOOLS
+        )
+        return {
+            "summary": f"Running skill '{skill_def.name}':\n{summary_body}",
+            "has_write_ops": has_write_ops,
+        }
+
+    # Free-agent path: lightweight LLM call
+    if llm is None:
+        return {"summary": command, "has_write_ops": False}
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=PREVIEW_INTENT_SYSTEM),
+            HumanMessage(content=f"User command: {command}"),
+        ])
+        raw = response.content.strip()
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        if "```" in raw:
+            parts_list = raw.split("```")
+            if len(parts_list) >= 3:
+                fenced = parts_list[1]
+                if fenced.startswith("json"):
+                    fenced = fenced[4:]
+                raw = fenced.strip()
+        result = json.loads(raw)
+        if isinstance(result, dict) and "summary" in result:
+            return result
+    except Exception as e:
+        logger.warning("preview_intent LLM call failed: %s", e)
+
+    # Fallback: use command as summary
+    return {"summary": command, "has_write_ops": False}

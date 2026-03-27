@@ -24,6 +24,7 @@ class Settings(BaseModel):
     
     # Agent/RAG Configuration
     max_iterations: Optional[int] = Field(None, description="Max iterations for agent RAG loops")
+    cli_max_iterations: int = Field(5, description="Max tool-call iterations per CLI command in the dynamic execution loop")
     vector_score_threshold: Optional[float] = Field(0.3, description="Minimum similarity threshold for vector search. Also fast-path threshold for vector search auto-approve.")
     auto_approve_max_items: Optional[int] = Field(None, description="Fast-path threshold for few-context auto-approve")
     chunk_max_chars: Optional[int] = Field(800, description="Max characters per chunk for knowledge document splitting")

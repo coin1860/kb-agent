@@ -23,22 +23,24 @@ _MAX_DESC_WORDS = 15
 ROUTER_SYSTEM = """\
 You are an intent router for a CLI agent. You have a list of available skills.
 
-Given the user's command, decide if it matches one of the skills or not.
+Given the user's command, decide the best route.
 
 Respond with ONLY valid JSON, no other text:
+- If it is a greeting, chitchat, or a simple question you can answer with general knowledge (no tools needed): {"route": "chitchat"}
 - If it matches a skill: {"route": "skill", "skill_id": "<skill name>"}
-- If no skill matches: {"route": "free_agent"}
+- If no skill matches but tools are needed: {"route": "free_agent"}
 
 Rules:
-- Match if the command's intent aligns with a skill's purpose, even if wording differs
-- Prefer free_agent for generic queries, simple lookups, or code tasks not covered by a skill
-- If uncertain, prefer free_agent
+- Use chitchat for: greetings (hi, hello, how are you), simple pleasantries, questions answerable without any external data or tools
+- Match skill if the command's intent aligns with a skill's purpose, even if wording differs
+- Prefer free_agent for generic queries, lookups, code tasks, or anything requiring external data not covered by a skill
+- If uncertain between chitchat and free_agent, prefer free_agent
 """
 
 
 @dataclass
 class RouteResult:
-    route: str          # "skill" or "free_agent"
+    route: str          # "chitchat", "skill", or "free_agent"
     skill_id: Optional[str] = None
 
 
@@ -99,6 +101,9 @@ def route_intent(command: str, skills: dict[str, SkillDef], llm) -> RouteResult:
         if route == "skill" and skill_id and skill_id in skills:
             log_audit("skill_route_result", {"route": "skill", "skill_id": skill_id})
             return RouteResult(route="skill", skill_id=skill_id)
+        elif route == "chitchat":
+            log_audit("skill_route_result", {"route": "chitchat"})
+            return RouteResult(route="chitchat")
         else:
             log_audit("skill_route_result", {"route": "free_agent"})
             return RouteResult(route="free_agent")

@@ -88,3 +88,14 @@ def test_route_no_skills():
 
     assert result.route == "free_agent"
     llm.invoke.assert_not_called()
+
+
+def test_route_chitchat(skills):
+    """If LLM returns chitchat route, RouteResult.route is 'chitchat'."""
+    from kb_agent.skill.router import route_intent
+
+    llm = _make_llm(json.dumps({"route": "chitchat"}))
+    result = route_intent("hello, how are you?", skills, llm)
+
+    assert result.route == "chitchat"
+    assert result.skill_id is None

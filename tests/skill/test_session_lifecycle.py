@@ -26,8 +26,8 @@ def test_session_setup_and_cleanup(tmp_path):
     # Cleanup
     session.cleanup()
     
-    # Python code and temp should be gone
-    assert not session.python_code_dir.exists()
+    # temp should be gone, python_code_dir is persisted for 24h
+    assert session.python_code_dir.exists()
     assert not session.temp_dir.exists()
     
     # Output should remain

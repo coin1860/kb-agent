@@ -4,8 +4,14 @@ SkillShell — the interactive REPL for kb-cli.
 Provides:
 - Built-in commands: help/?, skills, exit/quit
 - @ file picker: type @ to select a file from the input/ folder
-- LLM-driven intent routing → plan generation → approval gate → execution
+- LLM-driven intent routing → two-layer milestone planning → approval gate → execution
 - In-session command history via readline
+
+Execution architecture:
+  Milestone Planner: plan_milestones() decomposes the command into coarse goals.
+  Milestone Executor: _execute_milestone() runs a focused Think–Act–Observe sub-loop
+    per milestone, delegating to SkillExecutor._execute_step() for Reflect + retry + auto-fix.
+  Legacy path: _legacy_execute_loop() preserved for debugging (flat single-level ReAct).
 """
 
 from __future__ import annotations
@@ -18,15 +24,17 @@ from typing import List, Optional
 
 from rich.console import Console
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from kb_agent.agent.tools import get_skill_tools
 from kb_agent.audit import log_audit
 from .executor import SkillExecutor
 from .interruptor import CancellationToken, InterruptHandler
 from .loader import SkillDef
-from .planner import generate_plan, replan
+from .planner import APPROVAL_TOOLS, Milestone, decide_next_step, generate_plan, replan
 from .renderer import SkillRenderer
 from .router import route_intent
-from .session import Session
+from .session import Session, StepRecord
 
 
 
@@ -64,6 +72,21 @@ class SkillShell:
         self._tool_list = get_skill_tools()
         self._tool_map = {t.name: t for t in self._tool_list}
         self._session: Optional[Session] = None
+
+        # Read cli_max_iterations from settings (default 3)
+        try:
+            from kb_agent.config import settings as _cfg_settings
+            self._cli_max_iterations: int = (
+                _cfg_settings.cli_max_iterations
+                if _cfg_settings and hasattr(_cfg_settings, "cli_max_iterations")
+                else 3
+            )
+        except Exception:
+            self._cli_max_iterations = 3
+
+        # SkillExecutor is instantiated once and reused across milestone sub-loops
+        # so Reflect/retry/auto-fix are available in the primary execution path.
+        self._executor = SkillExecutor(renderer=self.renderer, llm=self.llm)
 
     # ──────────────────────────────────────────────────────────────────────
     # Public entry point
@@ -257,71 +280,445 @@ class SkillShell:
         # Store resolved command so executor references the real path in LLM summary
         self._session.command = resolved
 
-        # 1. Route intent
-        self.renderer.print_info("🔍 Routing intent...")
-        route = route_intent(resolved, self.skills, self.llm)
+        # 1. Routing, Intent Preview, and Milestone Planning
+        self.renderer.print_info("🔍 Analyzing intent and planning...")
+        from .planner import generate_unified_plan
+        unified_plan = generate_unified_plan(
+            command=resolved,
+            session=self._session,
+            skills=self.skills,
+            llm=self.llm,
+            default_budget=self._cli_max_iterations
+        )
 
-        result: str = ""
+        route_type = unified_plan.route
+        skill_id = unified_plan.skill_id
+        summary = unified_plan.summary
+        has_write_ops = unified_plan.has_write_ops
+        milestones = unified_plan.milestones
 
-        if route.route == "skill" and route.skill_id:
-            # ── Skill path: matched playbook → plan → approve → execute ──────
-            skill_def = self.skills.get(route.skill_id)
-            self.renderer.print_info(f"🧩 Matched skill: [cyan]{route.skill_id}[/cyan]")
-            self._session.skill_name = route.skill_id
-
-            plan = generate_plan(resolved, self._session, self.llm, skill_def)
-            if not plan:
-                self.renderer.print_error("Could not generate a plan for this command.")
-                return
-
-            plan = self._approval_gate(plan)
-            if plan is None:
-                return  # User quit
-
-            cancel_token = CancellationToken()
-            executor = SkillExecutor(self.renderer, self.llm)
-
-            log_audit("skill_execute_start", {"command": command[:200], "steps": len(plan)})
-            self._session.write_manifest()
-
+        # ── Chitchat shortcut ───────────────
+        if route_type == "chitchat":
+            self.renderer.print_info("[dim]💬 Direct response[/dim]")
             try:
-                with InterruptHandler(cancel_token):
-                    result = executor.execute_plan(plan, self._session, self._tool_map, cancel_token)
+                from langchain_core.messages import HumanMessage
+                response = self.llm.invoke([HumanMessage(content=resolved)])
+                answer = response.content.strip()
+            except Exception as e:
+                logger.warning("Chitchat LLM call failed: %s", e)
+                answer = "Sorry, I encountered an error."
+            self.renderer.print_result(answer, title="Reply")
+            log_audit("chitchat_response", {"command": resolved[:200]})
+            return
 
-                if result:
-                    self.renderer.print_result(result, title="Execution Complete")
+        # ── Skill / free_agent ──
+        skill_def: Optional[SkillDef] = None
+        if route_type == "skill" and skill_id:
+            skill_def = self.skills.get(skill_id)
+            self.renderer.print_info(f"🧩 Matched skill: [cyan]{skill_id}[/cyan]")
+            self._session.skill_name = skill_id
 
-                log_audit("skill_execute_done", {"command": command[:200]})
-            finally:
-                self._session.cleanup()
+        # 2. Print intent preview
+        self.renderer.print_intent_preview(summary, has_write_ops)
 
-        else:
-            # ── Free-agent path: generate_plan → approve → execute (no skill_def) ──
-            plan = generate_plan(resolved, self._session, self.llm, skill_def=None)
-            if not plan:
-                self.renderer.print_error("Could not generate a plan for this command.")
-                return
+        # 3. Intent approval (auto-approve if read-only)
+        approved = self.renderer.print_intent_approval(has_write_ops)
+        if not approved:
+            self.renderer.print_info("Cancelled.")
+            return
 
-            plan = self._approval_gate(plan)
-            if plan is None:
-                return  # User quit
+        # 4. Dynamic execution loop
+        cancel_token = CancellationToken()
+        log_audit("dynamic_execute_start", {
+            "command": resolved[:200],
+            "route": route_type,
+            "skill": skill_def.name if skill_def else None,
+        })
+        self._session.write_manifest()
 
-            cancel_token = CancellationToken()
-            executor = SkillExecutor(self.renderer, self.llm)
+        try:
+            with InterruptHandler(cancel_token):
+                result = self._milestone_execute_loop(
+                    command=resolved,
+                    milestones=milestones,
+                    skill_def=skill_def,
+                    session=self._session,
+                    cancel_token=cancel_token
+                )
+            if result:
+                self.renderer.print_result(result, title="Answer")
+            log_audit("milestone_execute_done", {"command": resolved[:200]})
+        finally:
+            self._session.cleanup()
 
-            log_audit("free_agent_execute_start", {"command": command[:200], "steps": len(plan)})
-            self._session.write_manifest()
+    # TODO: remove legacy loop after 2-week bake period
+    def _legacy_execute_loop(
+        self,
+        command: str,
+        skill_def: Optional[SkillDef],
+        session: Session,
+        cancel_token: CancellationToken,
+    ) -> str:
+        """
+        [LEGACY] Flat single-level ReAct loop: decide_next_step → execute → repeat.
 
-            try:
-                with InterruptHandler(cancel_token):
-                    result = executor.execute_plan(plan, self._session, self._tool_map, cancel_token)
+        Preserved for debugging.  Primary path now uses _milestone_execute_loop().
+        """
+        from datetime import datetime, timezone
 
-                if result:
-                    self.renderer.print_result(result, title="Answer")
+        tool_history: list[dict] = []
+        max_iter = self._cli_max_iterations
+        final_answer = ""
 
-                log_audit("free_agent_execute_done", {"command": command[:200]})
-            finally:
-                self._session.cleanup()
+        for iteration in range(1, max_iter + 2):  # +1 extra for forced final_answer pass
+            # ── Cancellation check ────────────────────────────────────────
+            if cancel_token.is_set():
+                cancel_token.reset()
+                self.renderer.print_info("⏸ Interrupted — stopping execution.")
+                break
+
+            # ── Decide next action ────────────────────────────────────────
+            action = decide_next_step(
+                command=command,
+                session=session,
+                llm=self.llm,
+                skill_def=skill_def,
+                tool_history=tool_history,
+                iteration=iteration,
+                max_iterations=max_iter,
+            )
+
+            action_type = action.get("action", "final_answer")
+            reason = action.get("reason", "")
+
+            # ── Final answer ──────────────────────────────────────────────
+            if action_type == "final_answer":
+                final_answer = action.get("answer", "")
+                break
+
+            # ── Tool call ─────────────────────────────────────────────────
+            tool_name = action.get("tool", "")
+            args = action.get("args", {})
+
+            self.renderer.print_dynamic_step_header(iteration, max_iter, reason)
+            self.renderer.print_think(reason or f"Calling {tool_name}")
+            self.renderer.print_act(tool_name, args)
+
+            # Per-step approval for write ops
+            if tool_name in APPROVAL_TOOLS:
+                from rich.prompt import Prompt
+                raw = Prompt.ask(
+                    f"[bold yellow]⚠️  {tool_name} requires approval. Proceed?[/bold yellow] "
+                    "[dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
+                    choices=["y", "n"],
+                    default="y",
+                    show_choices=False,
+                ).lower()
+                if raw != "y":
+                    self.renderer.print_info(f"Skipped {tool_name}.")
+                    tool_history.append({
+                        "step": iteration, "tool": tool_name, "args": args,
+                        "result": "[user skipped]", "status": "skipped",
+                    })
+                    continue
+
+            tool_fn = self._tool_map.get(tool_name)
+            started_at = datetime.now(timezone.utc).isoformat()
+            if tool_fn is None:
+                result_str = f"Error: unknown tool '{tool_name}'"
+                status = "error"
+                self.renderer.print_observe(result_str, is_error=True)
+            else:
+                try:
+                    result_str = str(tool_fn.invoke(args))
+                    status = "success"
+                except Exception as e:
+                    result_str = f"Tool error ({tool_name}): {e}"
+                    status = "error"
+                self.renderer.print_observe(result_str, is_error=(status == "error"))
+
+            # Write audit record
+            record = StepRecord(
+                step_number=len(session.steps) + 1,
+                tool=tool_name,
+                args=args,
+                status=status,
+                started_at=started_at,
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                result_summary=result_str[:500],
+            )
+            session.add_step(record)
+            log_audit("dynamic_step_done", {"tool": tool_name, "status": status})
+
+            tool_history.append({
+                "step": iteration,
+                "tool": tool_name,
+                "args": args,
+                "result": result_str,
+                "status": status,
+            })
+
+        return final_answer
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Two-layer milestone execution  (primary path)
+    # ──────────────────────────────────────────────────────────────────────
+
+    _COMPRESS_SYSTEM = """\
+You are a milestone summariser for an AI agent. Given a milestone goal and the raw
+tool outputs produced during that milestone, write a comprehensive summary (up to 4,000 tokens)
+that:
+- States what was done and what was found
+- Preserves ALL structured artefacts exactly: file paths, ticket IDs, numbers, URLs, and data snippets
+- Retains as much useful detail as possible from the raw output, condensing only the fluff
+
+This summary will be passed as context to subsequent milestones.
+"""
+
+    def _compress_milestone_result(
+        self,
+        milestone: Milestone,
+        raw_result: str,
+        llm,
+    ) -> str:
+        """
+        Compress a milestone's raw output into a ≤200-token paragraph summary.
+
+        Falls back to raw_result[:1000] (truncated at last newline) on LLM error.
+        """
+        try:
+            # We pass a larger chunk of raw output since the model can handle it
+            user_msg = (
+                f"Milestone goal: {milestone.goal}\n\n"
+                f"Raw output:\n{raw_result[:40000]}"
+            )
+            resp = llm.invoke([
+                SystemMessage(content=self._COMPRESS_SYSTEM),
+                HumanMessage(content=user_msg),
+            ])
+            summary = resp.content.strip()
+            usage = getattr(resp, "usage_metadata", None)
+            if usage:
+                logger.debug(
+                    "Milestone compression: %d output tokens",
+                    usage.get("output_tokens", 0),
+                )
+            return summary if summary else raw_result[:1000]
+        except Exception as e:
+            logger.warning("_compress_milestone_result failed: %s", e)
+            # Truncate at last newline within first 1000 chars
+            chunk = raw_result[:1000]
+            nl = chunk.rfind("\n")
+            return chunk[:nl] if nl > 0 else chunk
+
+    def _execute_milestone(
+        self,
+        milestone: Milestone,
+        prior_context: str,
+        session: Session,
+        cancel_token: CancellationToken,
+        command: str,
+        skill_def: Optional[SkillDef],
+        milestone_index: int,
+    ) -> str:
+        """
+        Run a focused Think\u2013Act\u2013Observe sub-loop for a single milestone.
+
+        Delegates individual step execution to SkillExecutor._execute_step() so
+        that Reflect, retry, and Python auto-fix are active in the primary path.
+
+        Returns the raw result string from the milestone (before compression).
+        """
+        from .planner import PlanStep
+
+        # Initialise tool history from all previous session steps to provide cumulative context
+        tool_history: list[dict] = [
+            {
+                "step": srec.step_number,
+                "tool": srec.tool,
+                "args": srec.args,
+                "result": srec.result_summary,
+                "status": srec.status,
+            }
+            for srec in session.steps
+        ]
+        max_iter = milestone.iteration_budget
+        milestone_result = ""
+
+        self.renderer.print_info(
+            f"\n[bold cyan]\U0001f3af Milestone {milestone_index}: {milestone.goal}[/bold cyan]"
+        )
+        self.renderer.print_info(f"[dim]Expected: {milestone.expected_output}[/dim]")
+
+        for iteration in range(1, max_iter + 2):  # +1 for forced final_answer pass
+            # ── Cancellation check ────────────────────────────────────────
+            if cancel_token.is_set():
+                cancel_token.reset()
+                self.renderer.print_info("⏸ Interrupted — stopping milestone.")
+                break
+
+            # ── Decide next action (milestone-focused) ────────────────────
+            action = decide_next_step(
+                command=command,
+                session=session,
+                llm=self.llm,
+                skill_def=skill_def,
+                tool_history=tool_history,
+                iteration=iteration,
+                max_iterations=max_iter,
+                milestone_goal=milestone.goal,
+                prior_context=prior_context or None,
+            )
+
+            action_type = action.get("action", "final_answer")
+            reason = action.get("reason", "")
+
+            # ── Milestone done ────────────────────────────────────────────
+            if action_type == "final_answer":
+                milestone_result = action.get("answer", "")
+                break
+
+            # ── Tool call ─────────────────────────────────────────────────
+            tool_name = action.get("tool", "")
+            args = action.get("args", {})
+            finish_flag = action.get("finish_milestone", False)
+
+            self.renderer.print_dynamic_step_header(iteration, max_iter, reason)
+
+            # Per-step approval for write ops
+            if tool_name in APPROVAL_TOOLS:
+                from rich.prompt import Prompt
+                raw_ans = Prompt.ask(
+                    f"[bold yellow]⚠️  {tool_name} requires approval. Proceed?[/bold yellow] "
+                    "[dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
+                    choices=["y", "n"],
+                    default="y",
+                    show_choices=False,
+                ).lower()
+                if raw_ans != "y":
+                    self.renderer.print_info(f"Skipped {tool_name}.")
+                    tool_history.append({
+                        "step": iteration, "tool": tool_name, "args": args,
+                        "result": "[user skipped]", "status": "skipped",
+                    })
+                    # Skipped steps do NOT advance iteration count
+                    continue
+
+            # Build a transient PlanStep so SkillExecutor._execute_step() can
+            # apply Reflect + retry + Python auto-fix.
+            step = PlanStep(
+                step_number=len(session.steps) + 1,
+                description=reason or f"Call {tool_name} (milestone: {milestone.goal[:60]})",
+                tool=tool_name,
+                args=args,
+                requires_approval=(tool_name in APPROVAL_TOOLS),
+            )
+
+            # Delegate to SkillExecutor — this gives us Reflect, retry, auto-fix
+            step_outputs: dict = {}  # no cross-step arg resolution needed here
+            result_str = self._executor._execute_step(
+                step=step,
+                session=session,
+                tool_map=self._tool_map,
+                cancel_token=cancel_token,
+                step_outputs=step_outputs,
+            )
+
+            tool_history.append({
+                "step": iteration,
+                "tool": tool_name,
+                "args": args,
+                "result": result_str,
+                "status": "success",
+            })
+            log_audit("milestone_step_done", {"tool": tool_name, "milestone": milestone_index})
+
+            if finish_flag:
+                self.renderer.print_info("[dim]🎯 Milestone finish flag received, terminating early.[/dim]")
+                milestone_result = result_str
+                break
+
+        return milestone_result
+
+    def _milestone_execute_loop(
+        self,
+        command: str,
+        milestones: list,
+        skill_def: Optional[SkillDef],
+        session: Session,
+        cancel_token: CancellationToken,
+    ) -> str:
+        """
+        Two-layer execution: Milestone Planner \u2192 per-milestone sub-loops.
+
+        1. plan_milestones() has already decomposed the command into coarse goals.
+        2. _execute_milestone() runs a focused sub-loop per milestone,
+           delegating to SkillExecutor._execute_step() for resilience.
+        3. _compress_milestone_result() distils each result for the next milestone.
+
+        Returns the final accumulated answer string.
+        """
+        log_audit("milestone_execute_start", {
+            "command": command[:200],
+            "skill": skill_def.name if skill_def else None,
+        })
+
+        # ── Step 1: Milestones received ─────────────────────────────
+
+
+        self.renderer.print_info(
+            f"[dim]📋 Plan: {len(milestones)} milestone(s)[/dim]"
+        )
+        for i, m in enumerate(milestones, 1):
+            self.renderer.print_info(f"[dim]  {i}. {m.goal}[/dim]")
+
+        # ── Step 2: Execute each milestone ────────────────────────────────
+        prior_context = ""
+        final_results: list[str] = []
+
+        for i, milestone in enumerate(milestones, 1):
+            if cancel_token.is_set():
+                self.renderer.print_info("⏸ Interrupted — halting remaining milestones.")
+                break
+
+            raw_result = self._execute_milestone(
+                milestone=milestone,
+                prior_context=prior_context,
+                session=session,
+                cancel_token=cancel_token,
+                command=command,
+                skill_def=skill_def,
+                milestone_index=i,
+            )
+            final_results.append(raw_result)
+
+            # ── Compress and forward context to next milestone ─────────────
+            if i < len(milestones):
+                if len(raw_result) < 8000:
+                    compressed = raw_result
+                    self.renderer.print_info(f"[dim]⚡ Fast-pass context: bypassed compression ({len(raw_result)} chars)[/dim]")
+                    logger.debug("Milestone %d result under 8k chars, skipping compression", i)
+                else:
+                    compressed = self._compress_milestone_result(milestone, raw_result, self.llm)
+                    logger.debug("Milestone %d compressed to %d chars", i, len(compressed))
+                
+                label = f"[Milestone {i}: {milestone.goal}]\n{compressed}"
+                prior_context = (prior_context + "\n\n" + label).strip() if prior_context else label
+
+            # ── Audit milestone completion ─────────────────────────────────
+            log_audit("milestone_done", {
+                "index": i,
+                "goal": milestone.goal[:80],
+                "result_len": len(raw_result),
+            })
+
+        # Return the last milestone's result as the final answer
+        return final_results[-1] if final_results else ""
+
+    def _intent_approval(self, preview: dict) -> bool:
+        """Show intent preview and prompt user for approval. Returns True if approved."""
+        self.renderer.print_intent_preview(preview["summary"], preview.get("has_write_ops", False))
+        return self.renderer.print_intent_approval(preview.get("has_write_ops", False))
 
     def _approval_gate(self, plan: list) -> Optional[list]:
         """

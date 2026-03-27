@@ -171,6 +171,36 @@ class SkillRenderer:
         }
         return mapping.get(raw_choice, "approve")
 
+    def print_intent_preview(self, summary: str, has_write_ops: bool) -> None:
+        """Display intent summary panel before execution."""
+        icon = "⚠️" if has_write_ops else "📋"
+        write_note = "\n[dim yellow]⚠️  This task includes file write or script execution steps.[/dim yellow]" if has_write_ops else ""
+        self.console.print(Panel(
+            f"{escape(summary)}{write_note}",
+            title=f"[bold cyan]{icon} What I'll Do[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
+
+    def print_intent_approval(self, has_write_ops: bool) -> bool:
+        """Prompt user to approve the intent. Returns True if approved."""
+        if not has_write_ops:
+            self.console.print("[dim]✓ Auto-approved (read-only task)[/dim]")
+            return True
+        self.console.print()
+        raw = Prompt.ask(
+            "[bold cyan]Proceed?[/bold cyan] [dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
+            choices=["y", "n", "yes", "no"],
+            default="y",
+            show_choices=False,
+        ).lower()
+        return raw in ("y", "yes")
+
+    def print_dynamic_step_header(self, iteration: int, max_iterations: int, reason: str = "") -> None:
+        """Show iteration progress in the dynamic decision loop."""
+        suffix = f"  [dim italic]{escape(reason[:80])}[/dim italic]" if reason else ""
+        self.console.rule(f"[bold]Iteration {iteration}/{max_iterations}[/bold]{suffix}")
+
     def print_replan_prompt(self) -> str:
         """Prompt user for a re-plan instruction."""
         self.console.print()

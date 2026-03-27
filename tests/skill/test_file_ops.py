@@ -18,8 +18,15 @@ def data_folder(tmp_path):
 
 @pytest.fixture(autouse=True)
 def mock_data_folder(data_folder):
-    """Patch _get_data_folder to use the tmp data folder."""
-    with patch("kb_agent.tools.atomic.file_ops._get_data_folder", return_value=data_folder):
+    """Patch _get_data_folder and settings to use the tmp data folder."""
+    class DummySettings:
+        data_folder = str(data_folder)
+        output_path = None
+        python_code_path = None
+        temp_path = None
+
+    with patch("kb_agent.tools.atomic.file_ops._get_data_folder", return_value=data_folder), \
+         patch("kb_agent.config.settings", DummySettings()):
         yield data_folder
 
 

@@ -1,6 +1,15 @@
 """
-Skill executor — runs a plan step-by-step with Think/Act/Observe/Reflect,
+Skill executor — runs plan steps with Think/Act/Observe/Reflect,
 cancellation-token-based interrupt support, and step audit trail.
+
+Primary usage (as of hierarchical-planner-executor change):
+  _execute_step() is called by SkillShell._execute_milestone() for each tool
+  call within a milestone sub-loop, providing Reflect + retry + Python auto-fix
+  in the main execution path (not only in the legacy static-plan path).
+
+Legacy usage:
+  execute_plan() accepts a pre-built list[PlanStep] and runs them sequentially.
+  Still valid for skill-playbook-driven flows and direct testing.
 """
 
 from __future__ import annotations
@@ -24,6 +33,14 @@ from .session import Session, StepRecord
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 2
+_AUTO_FIX_MAX = 3
+
+SAFE_READ_TOOLS = {
+    "jira_fetch", "jira_jql", "vector_search", "get_knowledge", 
+    "ls", "list_dir", "grep", "grep_search", "view_file", 
+    "read_url_content", "read_browser_page", "command_status", 
+    "direct_response"
+}
 
 REFLECT_SYSTEM = """\
 You are evaluating whether a tool execution step succeeded and the plan should continue.
@@ -72,27 +89,7 @@ Your job: produce a clear, concise natural-language answer to the user's questio
 - Reply in the same language the user used (Chinese/English)
 """
 
-_AUTO_FIX_MAX = 3
 
-RESOLVE_ARGS_SYSTEM = """\
-You are a tool argument resolver for a multi-step task executor.
-
-You will be given:
-1. The current step description and its planned args (which may contain placeholder references like {search_results})
-2. The outputs from all previous steps
-
-Your job: produce the CONCRETE args dict for this step by:
-- Replacing any placeholder references with the actual content from previous steps
-- Synthesizing/formatting content from previous step outputs as needed (e.g., converting raw JSON search results into nicely formatted Markdown)
-- Keeping any args that are already concrete values unchanged
-
-IMPORTANT rules:
-- For write_file: the 'content' field must be the actual formatted content to write (in Markdown if appropriate), NOT a placeholder
-- For run_python: the 'script_path' must be a real path
-- Always include ALL required args for the tool — do not drop any
-
-Respond with ONLY a valid JSON object of the resolved args. No other text.
-"""
 
 
 def _now_iso() -> str:
@@ -362,62 +359,7 @@ class SkillExecutor:
 
         return "\n\n".join(accumulated_results) if accumulated_results else ""
 
-    def _resolve_args(
-        self,
-        step: PlanStep,
-        step_outputs: dict[int, str],
-    ) -> dict:
-        """
-        Use LLM to resolve concrete args for this step.
 
-        Only invoked when:
-        - There are previous step outputs available, AND
-        - The step has args that might contain placeholder references OR
-          the step requires content generated from previous steps (e.g. write_file).
-        """
-        args_str = json.dumps(step.args, ensure_ascii=False)
-
-        # Check if we even need resolution: does args_str contain placeholders
-        # or is this a write/run step that depends on prior output?
-        needs_resolution = (
-            "{" in args_str
-            or step.tool in ("write_file", "run_python")
-        ) and bool(step_outputs)
-
-        if not needs_resolution:
-            return step.args
-
-        # Build context from prior steps
-        context_parts = []
-        for step_num, output in sorted(step_outputs.items()):
-            # Limit each prior output to 3000 chars to keep prompt manageable
-            context_parts.append(f"Step {step_num} output:\n{output[:3000]}")
-        context_str = "\n\n".join(context_parts)
-
-        user_msg = (
-            f"Current step: {step.description}\n"
-            f"Tool: {step.tool}\n"
-            f"Planned args: {args_str}\n\n"
-            f"Previous step outputs:\n{context_str}"
-        )
-
-        try:
-            response = self.llm.invoke([
-                SystemMessage(content=RESOLVE_ARGS_SYSTEM),
-                HumanMessage(content=user_msg),
-            ])
-            raw = re.sub(r"<think>.*?</think>", "", response.content, flags=re.DOTALL).strip()
-            if "```" in raw:
-                parts = raw.split("```")
-                raw = parts[1].lstrip("json").strip() if len(parts) >= 3 else raw
-            resolved = json.loads(raw)
-            if isinstance(resolved, dict):
-                logger.debug("Resolved args for %s: %s", step.tool, list(resolved.keys()))
-                return resolved
-        except Exception as e:
-            logger.warning("Arg resolution failed for step %d (%s): %s", step.step_number, step.tool, e)
-
-        return step.args  # Fall back to original args on failure
 
     def _execute_step(
         self,
@@ -435,12 +377,10 @@ class SkillExecutor:
         while retry_count <= _MAX_RETRIES:
             started_at = _now_iso()
 
-            # ── Think: resolve actual args from prior step outputs ────────
-            resolved_args = self._resolve_args(step, step_outputs)
-            think_msg = (
-                f"Executing {step.tool} for: {step.description}"
-                + (" (args resolved from prior outputs)" if resolved_args != step.args else "")
-            )
+            # ── Think ─────────────────────────────────────────────────────────
+            # Args are resolved upstream, directly use step.args
+            resolved_args = step.args
+            think_msg = f"Executing {step.tool} for: {step.description}"
             self.renderer.print_think(think_msg)
 
             # ── Act ───────────────────────────────────────────────────────
@@ -475,8 +415,14 @@ class SkillExecutor:
                 ended_at = _now_iso()
 
                 # ── Reflect ───────────────────────────────────────────────────
-                verdict, reason = _reflect(step, result, self.llm)
-                self.renderer.print_reflect(verdict, reason)
+                if step.tool in SAFE_READ_TOOLS and not is_error and len(result) > 50:
+                    verdict, reason = "continue", "Auto-approved fast-pass for safe read tool"
+                    self.renderer.print_info(f"[dim]⚡ Fast-pass reflection: skipped ({len(result)} chars)[/dim]")
+                    log_audit("skill_step_reflect_skipped", {"tool": step.tool, "reason": "fast_pass", "length": len(result)})
+                else:
+                    verdict, reason = _reflect(step, result, self.llm)
+                    self.renderer.print_reflect(verdict, reason)
+                    log_audit("skill_step_reflect_forced", {"tool": step.tool, "verdict": verdict})
 
                 if verdict == "continue" or retry_count >= _MAX_RETRIES:
                     status = "done" if verdict != "abort" else "failed"
