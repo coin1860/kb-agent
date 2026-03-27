@@ -49,11 +49,13 @@ class SkillShell:
         llm,
         console: Optional[Console] = None,
         input_path: Optional[Path] = None,
+        temp_path: Optional[Path] = None,
     ):
         self.skills = skills
         self.output_path = output_path
         self.python_code_path = python_code_path
         self.input_path = input_path
+        self.temp_path = temp_path
         self.llm = llm
         self.renderer = SkillRenderer(console or Console())
         self.session_history: list[str] = []  # in-memory for this session only
@@ -74,7 +76,7 @@ class SkillShell:
                 "(type [bold cyan]@[/bold cyan] to pick a file)[/dim]"
             )
         self._session = Session()
-        self._session.setup_dirs(self.output_path, self.python_code_path)
+        self._session.setup_dirs(self.output_path, self.python_code_path, self.temp_path)
 
         # Build prompt_toolkit session once (None = fall back to plain input)
         pt_session = self._build_pt_session()

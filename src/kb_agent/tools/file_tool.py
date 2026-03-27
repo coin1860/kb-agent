@@ -15,6 +15,11 @@ class FileTool:
                 self.allowed_paths.append(settings.index_path.resolve())
             if settings.input_path:
                 self.allowed_paths.append(settings.input_path.resolve())
+            # Also allow reading from output/ and temp/ — these are written by write_file
+            if settings.output_path:
+                self.allowed_paths.append(settings.output_path.resolve())
+            if settings.temp_path:
+                self.allowed_paths.append(settings.temp_path.resolve())
 
     def read_file(self, file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """
@@ -58,12 +63,17 @@ class FileTool:
                 return f"[ERROR: ACCESS_DENIED] Path '{file_path}' is outside allowed directories. Allowed directories are: [{allowed_str}]"
 
             if not path.exists():
-                # Fallback: source/X.ext → index/X.md (files are converted during indexing)
+                # Fallback 1: source/X.ext → index/X.md (files are converted during indexing)
                 fallback = self._resolve_source_to_index(file_path)
                 if fallback and fallback.exists():
                     path = fallback
                 else:
-                    return f"[ERROR: NOT_FOUND] File '{file_path}' does not exist."
+                    # Fallback 2: search for the filename anywhere under data_folder
+                    basename = Path(file_path).name
+                    content = self._data_folder_fallback(basename)
+                    if content is not None:
+                        return content
+                    return f"[ERROR: NOT_FOUND] File '{file_path}' does not exist. Searched for '{basename}' across all data folders but found no match."
             else:
                 # Even if the source file exists, prefer the indexed .md version
                 # which contains the fully processed content
@@ -93,6 +103,54 @@ class FileTool:
             return content
         except Exception as e:
             return f"[ERROR: READ_FAILED] Unexpected error reading {file_path}: {str(e)}"
+
+    def _data_folder_fallback(self, basename: str) -> Optional[str]:
+        """
+        Search for a file by its basename across data_folder subdirectories.
+
+        Priority order:
+          1. temp/**/<basename>   — most likely: LLM just wrote an intermediate file here
+          2. output/**/<basename> — final outputs
+          3. input/<basename>     — user-uploaded files
+          4. source/**/<basename>
+          5. index/**/<basename>
+
+        Within each directory, the most recently modified match is preferred.
+        Returns the file content as a string, or None if not found anywhere.
+        """
+        settings = config.settings
+        if not settings or not settings.data_folder:
+            return None
+
+        data_folder = Path(settings.data_folder).resolve()
+
+        search_dirs = []
+        # Build ordered list of directories to search
+        if settings.temp_path:
+            search_dirs.append(Path(settings.temp_path).resolve())
+        if settings.output_path:
+            search_dirs.append(Path(settings.output_path).resolve())
+        if settings.input_path:
+            search_dirs.append(Path(settings.input_path).resolve())
+        if settings.source_docs_path:
+            search_dirs.append(Path(settings.source_docs_path).resolve())
+        if settings.index_path:
+            search_dirs.append(Path(settings.index_path).resolve())
+
+        for search_dir in search_dirs:
+            if not search_dir.exists():
+                continue
+            # Glob recursively for the exact filename
+            matches = list(search_dir.glob(f"**/{basename}"))
+            if matches:
+                # Sort by modification time, most recent first
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                try:
+                    return matches[0].read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+
+        return None
 
     @staticmethod
     def _resolve_source_to_index(file_path: str) -> Optional[Path]:

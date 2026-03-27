@@ -19,4 +19,7 @@ schema: spec-driven
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
 
-这里这行任何python 命令都需要source ./bin/activate
+context: |
+  Python commands must use: source ./bin/activate
+  Tech stack: Python, LangChain, LangGraph, Pydantic, Rich, Typer
+  Key directories: src/kb_agent/ (main package), openspec/ (change management)

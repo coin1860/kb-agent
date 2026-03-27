@@ -57,10 +57,18 @@ def write_file(
     All paths are relative to data_folder. Absolute paths or path traversal
     attempts (../../) are blocked.
 
+    **Path conventions:**
+    - Intermediate/temporary files (used between steps): use ``temp/<filename>``
+      (e.g. ``temp/analysis.json``, ``temp/raw_data.csv``).
+      These are automatically deleted when the task completes.
+    - Final output files explicitly requested by the user (.md, .csv, .pdf, etc.):
+      use ``output/<filename>`` (e.g. ``output/report.md``).
+      These are kept permanently.
+
     **This tool REQUIRES user approval before execution.**
 
     Args:
-        path: File path relative to data_folder (e.g. 'output/report.md').
+        path: File path relative to data_folder (e.g. 'temp/analysis.json' or 'output/report.md').
         content: File content to write (ignored for 'delete' mode).
         mode: One of 'create' (fail if exists), 'overwrite' (always write),
               'append' (add to end), 'delete' (remove file).

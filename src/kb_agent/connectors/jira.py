@@ -152,6 +152,80 @@ class JiraConnector(BaseConnector):
         results = self._fetch_issue(issue_key, force_refresh=force_refresh)
         return results[0] if results else None
 
+    def create_issue(
+        self,
+        project_key: str,
+        summary: str,
+        description: str = "",
+        issue_type: str = "Task",
+    ) -> Dict[str, Any]:
+        """
+        Create a new Jira issue.
+
+        Args:
+            project_key: The Jira project key (e.g. 'KB'). Falls back to
+                         settings.jira_default_project if empty.
+            summary: The issue title/summary (required).
+            description: Optional issue description (plain text).
+            issue_type: Issue type name (default: 'Task').
+
+        Returns:
+            Dict with 'key', 'url', 'summary', 'project', 'issue_type' on success,
+            or 'error': True and 'content': '<message>' on failure.
+        """
+        if not self._is_configured:
+            return {
+                "error": True,
+                "content": "Jira not configured (missing URL/token). Please set KB_AGENT_JIRA_URL and KB_AGENT_JIRA_TOKEN.",
+            }
+
+        # Resolve project key
+        resolved_project = project_key.strip() if project_key else ""
+        if not resolved_project:
+            resolved_project = (config.settings.jira_default_project or "").strip() if config.settings else ""
+
+        if not resolved_project:
+            return {
+                "error": True,
+                "content": (
+                    "No project key provided and no default project configured. "
+                    "Please specify project_key or set KB_AGENT_JIRA_DEFAULT_PROJECT."
+                ),
+            }
+
+        if not summary or not summary.strip():
+            return {"error": True, "content": "Summary is required to create a Jira issue."}
+
+        try:
+            fields: Dict[str, Any] = {
+                "project": {"key": resolved_project.upper()},
+                "summary": summary.strip(),
+                "issuetype": {"name": issue_type},
+            }
+            if description:
+                fields["description"] = description
+
+            result = self.jira.create_issue(fields=fields)
+
+            issue_key = result.get("key", "")
+            issue_url = f"{self.base_url}/browse/{issue_key}" if issue_key else ""
+
+            logger.info(f"Created Jira issue: {issue_key}")
+            return {
+                "key": issue_key,
+                "url": issue_url,
+                "summary": summary.strip(),
+                "project": resolved_project.upper(),
+                "issue_type": issue_type,
+            }
+
+        except Exception as e:
+            logger.error(f"Jira create issue error: {e}")
+            return {
+                "error": True,
+                "content": f"Failed to create Jira issue in project '{resolved_project}': {e}",
+            }
+
     def _search_jql(self, jql: str) -> List[Dict[str, Any]]:
         """Search Jira using arbitrary JQL query."""
         try:

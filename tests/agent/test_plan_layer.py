@@ -5,7 +5,7 @@ def test_is_tool_applicable():
     assert _is_tool_applicable("jira_fetch", "What is PROJ-123?") == True
     assert _is_tool_applicable("jira_fetch", "What is Introduction?") == False
     
-    assert _is_tool_applicable("confluence_fetch", "Check page 123456") == True
+    assert _is_tool_applicable("confluence_fetch", "Check page 1234567890") == True
     assert _is_tool_applicable("confluence_fetch", "Check confluence for this") == True
     assert _is_tool_applicable("confluence_fetch", "What is Introduction?") == False
     
@@ -23,7 +23,7 @@ def test_build_tool_args():
     assert _build_tool_args("jira_fetch", "What is PROJ-123?") == {"issue_key": "PROJ-123"}
     assert _build_tool_args("jira_fetch", "No ticket") == None
     
-    assert _build_tool_args("confluence_fetch", "Read page 123456") == {"page_id": "123456"}
+    assert _build_tool_args("confluence_fetch", "Read page 1234567890") == {"page_id": "1234567890"}
     assert _build_tool_args("web_fetch", "Here is https://example.com/spec") == {"url": "https://example.com/spec"}
     assert _build_tool_args("web_fetch", "No URL") == None
 

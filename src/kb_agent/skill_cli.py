@@ -92,6 +92,7 @@ def main(
         output_path = _to_path(settings.output_path)
         python_code_path = _to_path(settings.python_code_path)
         input_path = _to_path(settings.input_path)
+        temp_path = _to_path(settings.temp_path)
     except Exception as e:
         console.print(f"[bold red]Error resolving paths:[/bold red] {e}")
         console.print("[dim]Hint: set data_folder in kb-agent TUI settings or use --data-folder flag.[/dim]")
@@ -101,6 +102,7 @@ def main(
     output_path.mkdir(parents=True, exist_ok=True)
     python_code_path.mkdir(parents=True, exist_ok=True)
     input_path.mkdir(parents=True, exist_ok=True)
+    temp_path.mkdir(parents=True, exist_ok=True)
 
     # 6. Load skills
     from kb_agent.skill.loader import load_skills
@@ -124,6 +126,7 @@ def main(
         llm=llm,
         console=console,
         input_path=input_path,
+        temp_path=temp_path,
     )
     shell.start(effective_data_folder)
 

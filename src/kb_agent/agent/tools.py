@@ -12,6 +12,10 @@ import json
 from typing import Optional
 
 from langchain_core.tools import tool
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+import kb_agent.config as config
 
 # ---------------------------------------------------------------------------
 # Lazy singletons — created on first call so tests can monkeypatch easily.
@@ -245,6 +249,93 @@ def jira_jql(query: str) -> str:
 
 
 @tool
+def jira_create_ticket(
+    summary: str,
+    description: str = "",
+    project_key: str = "",
+    issue_type: str = "Task",
+) -> str:
+    """Create a new Jira ticket after confirming with the user.
+
+    Use this when the user wants to create, file, or log a new Jira issue.
+    If project_key is not provided, falls back to the configured default project.
+
+    The tool will display a summary of the ticket and ask the user to confirm
+    before creating it. No ticket is created without explicit user approval.
+
+    Args:
+        summary: The ticket title/summary (required).
+        description: Optional detailed description of the issue.
+        project_key: Jira project key (e.g. 'KB'). Uses default project if empty.
+        issue_type: Issue type (default: 'Task'). Common values: Task, Bug, Story.
+
+    Returns:
+        JSON with 'key' and 'url' of the created ticket, or an error/cancel message.
+    """
+    # Resolve project key
+    resolved_project = project_key.strip() if project_key else ""
+    if not resolved_project and config.settings:
+        resolved_project = (config.settings.jira_default_project or "").strip()
+
+    if not resolved_project:
+        return json.dumps({
+            "status": "error",
+            "message": (
+                "No project key provided and no default project configured. "
+                "Please specify a project_key argument or set KB_AGENT_JIRA_DEFAULT_PROJECT."
+            )
+        }, ensure_ascii=False)
+
+    if not summary or not summary.strip():
+        return json.dumps({
+            "status": "error",
+            "message": "Summary is required to create a Jira ticket."
+        }, ensure_ascii=False)
+
+    # Display approval panel
+    console = Console()
+    desc_preview = (description[:120] + "...") if len(description) > 120 else description
+    panel_content = Text()
+    panel_content.append(f"  Project:      ", style="bold")
+    panel_content.append(f"{resolved_project.upper()}\n")
+    panel_content.append(f"  Type:         ", style="bold")
+    panel_content.append(f"{issue_type}\n")
+    panel_content.append(f"  Summary:      ", style="bold")
+    panel_content.append(f"{summary.strip()}\n")
+    if desc_preview:
+        panel_content.append(f"  Description:  ", style="bold")
+        panel_content.append(f"{desc_preview}\n")
+
+    console.print()
+    console.print(Panel(
+        panel_content,
+        title="[bold yellow]Create Jira Ticket[/bold yellow]",
+        border_style="yellow",
+        expand=False,
+    ))
+
+    try:
+        answer = input("  Create this ticket? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+
+    if answer not in ("", "y", "yes"):
+        return json.dumps({
+            "status": "cancelled",
+            "message": "Ticket creation cancelled by user."
+        }, ensure_ascii=False)
+
+    # Create the ticket
+    result = _get_jira().create_issue(
+        project_key=resolved_project,
+        summary=summary.strip(),
+        description=description,
+        issue_type=issue_type,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool
 def confluence_create_page(parent_id: str, title: str, content: str) -> str:
     """Create a new Confluence page as a child of an existing page.
 
@@ -373,6 +464,7 @@ ALL_TOOLS = [
     # graph_related,
     jira_fetch,
     jira_jql,
+    jira_create_ticket,
     confluence_fetch,
     confluence_create_page,
     web_fetch,

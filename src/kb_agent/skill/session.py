@@ -58,14 +58,18 @@ class Session:
     steps: list[StepRecord] = field(default_factory=list)
     output_dir: Optional[Path] = None
     python_code_dir: Optional[Path] = None
+    temp_dir: Optional[Path] = None
     ended_at: Optional[str] = None
 
-    def setup_dirs(self, output_base: Path, python_code_base: Path) -> None:
-        """Create run-scoped directories under output and python_code bases."""
+    def setup_dirs(self, output_base: Path, python_code_base: Path, temp_base: Optional[Path] = None) -> None:
+        """Create run-scoped directories under output, python_code, and temp bases."""
         self.output_dir = output_base / self.run_id
         self.python_code_dir = python_code_base / self.run_id
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.python_code_dir.mkdir(parents=True, exist_ok=True)
+        if temp_base is not None:
+            self.temp_dir = temp_base / self.run_id
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _manifest_path(self) -> Optional[Path]:
         if self.output_dir is None:
@@ -106,14 +110,16 @@ class Session:
             "status": self.status,
             "output_dir": str(self.output_dir) if self.output_dir else None,
             "python_code_dir": str(self.python_code_dir) if self.python_code_dir else None,
+            "temp_dir": str(self.temp_dir) if self.temp_dir else None,
             "steps": [s.to_dict() for s in self.steps],
         }
 
     def cleanup(self) -> None:
-        """Deep clean any temporary resources (like the python_code_dir)."""
-        if self.python_code_dir and self.python_code_dir.exists():
-            import shutil
-            try:
-                shutil.rmtree(self.python_code_dir, ignore_errors=True)
-            except Exception:
-                pass
+        """Deep clean any temporary resources (like the python_code_dir and temp_dir)."""
+        import shutil
+        for dir_to_clean in (self.python_code_dir, self.temp_dir):
+            if dir_to_clean and dir_to_clean.exists():
+                try:
+                    shutil.rmtree(dir_to_clean, ignore_errors=True)
+                except Exception:
+                    pass

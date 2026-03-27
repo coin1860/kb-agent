@@ -44,6 +44,7 @@ class Settings(BaseModel):
     output_path: Optional[Path] = Field(None, description="Path to write skill execution outputs")
     python_code_path: Optional[Path] = Field(None, description="Path to store agent-generated Python scripts")
     input_path: Optional[Path] = Field(None, description="Path to input files for kb-cli @-mention file picker")
+    temp_path: Optional[Path] = Field(None, description="Path for intermediate temporary files during multi-step task execution (auto-cleaned after each task)")
 
     # Proxy
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
@@ -52,6 +53,7 @@ class Settings(BaseModel):
     # External Services
     jira_url: Optional[HttpUrl] = Field(None, description="Jira Instance URL")
     jira_token: Optional[SecretStr] = Field(None, description="Jira Personal Access Token / API Token")
+    jira_default_project: Optional[str] = Field(None, description="Default Jira project key used when creating tickets (e.g. 'KB', 'PROJ')")
     confluence_url: Optional[HttpUrl] = Field(None, description="Confluence Instance URL")
     confluence_token: Optional[SecretStr] = Field(None, description="Confluence Personal Access Token / API Token")
 
@@ -89,6 +91,8 @@ class Settings(BaseModel):
             self.python_code_path = (self.data_folder / "python_code") if self.data_folder else (Path.home() / ".kb-agent" / "python_code")
         if not self.input_path:
             self.input_path = (self.data_folder / "input") if self.data_folder else (Path.home() / ".kb-agent" / "input")
+        if not self.temp_path:
+            self.temp_path = (self.data_folder / "temp") if self.data_folder else (Path.home() / ".kb-agent" / "temp")
 
         if not self.audit_log_path:
             self.audit_log_path = Path("audit.log")

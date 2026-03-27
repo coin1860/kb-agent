@@ -74,7 +74,7 @@ def test_plan_with_write_requires_approval():
     plan = _plan_with_write()
 
     with patch.object(shell.renderer, "print_plan_table"), \
-         patch.object(shell.renderer, "print_approval_prompt", return_value="a") as mock_prompt:
+         patch.object(shell.renderer, "print_approval_prompt", return_value="approve") as mock_prompt:
 
         result = shell._approval_gate(plan)
 
@@ -89,7 +89,7 @@ def test_plan_approval_quit_returns_none():
     plan = _plan_with_write()
 
     with patch.object(shell.renderer, "print_plan_table"), \
-         patch.object(shell.renderer, "print_approval_prompt", return_value="q"), \
+         patch.object(shell.renderer, "print_approval_prompt", return_value="quit"), \
          patch.object(shell.renderer, "print_info"):
 
         result = shell._approval_gate(plan)
