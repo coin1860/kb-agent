@@ -26,6 +26,8 @@ APPROVAL_TOOLS = {"write_file", "run_python"}
 SKILL_TOOLS_DESCRIPTION = """\
 Available tools (with approval requirement):
 1. vector_search(query: str) — Semantic search over ChromaDB knowledge base. [no approval]
+   ⚠️  SUPPRESSED BY DEFAULT. Use ONLY when a user question cannot be answered directly
+   AND requires semantic retrieval of documents. Do NOT use for greetings or simple chitchat.
 2. read_file(file_path: str) — Read a local file by path. [no approval]
 3. jira_fetch(issue_key: str) — Fetch a Jira ticket by key (e.g. PROJ-123). [no approval]
 4. jira_jql(query: str) — Search Jira using natural language query. [no approval]
@@ -38,6 +40,12 @@ Available tools (with approval requirement):
 11. write_file(path: str, content: str, mode: str) — Write/delete a file under data_folder.
     mode: 'create' | 'overwrite' | 'append' | 'delete'. [REQUIRES APPROVAL]
 12. run_python(script_path: str, timeout_seconds: int=60) — Execute a Python script. [REQUIRES APPROVAL]
+13. rag_query(query: str) — Full RAG pipeline query over the knowledge base (semantic search + synthesis).
+    [no approval] ⚠️  SUPPRESSED BY DEFAULT. ONLY use this tool when the user explicitly mentions RAG,
+    e.g. "用RAG查", "RAG查询", "search knowledge base", "知识库搜索". Do NOT use for general questions,
+    coding tasks, writing files, or anything that does not explicitly request RAG retrieval.
+14. direct_response(answer: str) — Respond directly to the user with a message or chitchat.
+    Use this for greetings, simple pleasantries, or questions you can answer without any external data.
 """
 
 PLANNER_SYSTEM = """\
@@ -61,9 +69,14 @@ Rules:
 - IF a skill playbook is provided, your execution plan SHOULD follow its logic, but you MUST NOT create separate steps for internal reasoning/summarization.
 - Perform any required reasoning (like summarization or analysis) directly within the argument resolution of the tool call that needs it (e.g., generate the summary in the 'content' field of 'write_file').
 - requires_approval MUST be true for write_file and run_python, false for all others
-- Use the run_id '{run_id}' in python_code paths (e.g., 'python_code/{run_id}/step_1.py')
-- For file outputs, use 'output/' prefix (e.g., 'output/report.md')
 - Keep steps atomic — focus on physical tool actions (write, fetch, create)
+- Use the run_id '{run_id}' in 'python_code/' paths (e.g. 'python_code/{run_id}/step_1.py')
+- For file outputs, use 'output/' prefix (e.g. 'output/report.md')
+- For temporary intermediate files, use 'temp/' prefix (e.g. 'temp/data.json')
+- If you need to execute Python code, you MUST FIRST use 'write_file' to save the script before using 'run_python' to execute it.
+- Ensure all required files exist (via write_file or previous tool outputs) before they are used as arguments in subsequent tool calls.
+- For greetings (hi, hello), simple pleasantries, or any question that does not require searching the knowledge base or local files, use the 'direct_response' tool.
+- Do NOT use 'vector_search' or 'rag_query' unless the user intent clearly requires a knowledge base search.
 - Do NOT include any text outside the JSON array
 """
 
@@ -192,9 +205,9 @@ def generate_plan(
             logger.warning("Planner returned empty plan, using fallback")
             steps = [PlanStep(
                 step_number=1,
-                description=f"Execute: {command}",
-                tool="vector_search",
-                args={"query": command},
+                description=f"Direct Response: {command}",
+                tool="direct_response",
+                args={"answer": f"I understood your request: {command}"},
                 requires_approval=False,
             )]
 
@@ -205,9 +218,9 @@ def generate_plan(
         logger.error("Planner failed: %s", e)
         return [PlanStep(
             step_number=1,
-            description=f"Fallback search: {command}",
-            tool="vector_search",
-            args={"query": command},
+            description=f"Error fallback: {command}",
+            tool="direct_response",
+            args={"answer": f"Sorry, I encountered an error planning your request: {command}"},
             requires_approval=False,
         )]
 

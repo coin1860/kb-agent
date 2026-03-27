@@ -439,6 +439,44 @@ def csv_info(filename: str) -> str:
 
 
 @tool
+def rag_query(query: str) -> str:
+    """Run a full RAG (retrieval-augmented generation) pipeline query over the knowledge base.
+
+    Use this tool ONLY when the user explicitly asks to search the knowledge
+    base using RAG, e.g. "用RAG查一下...", "search knowledge base for...",
+    "RAG查询...". Do NOT use for general questions, coding tasks, or anything
+    that does not explicitly mention using RAG.
+
+    Args:
+        query: The natural language query to run through the RAG pipeline.
+
+    Returns:
+        A synthesized natural language answer from the knowledge base.
+    """
+    from kb_agent.agent.graph import compile_graph
+    graph = compile_graph()
+    result_state = graph.invoke({"query": query, "messages": [], "status_callback": None})
+    return result_state.get("final_answer") or ""
+
+
+@tool
+def direct_response(answer: str) -> str:
+    """Respond directly to the user with a pre-synthesized message.
+
+    Use this tool for greetings (hi, hello), simple pleasantries, chitchat,
+    or any query that can be answered directly without searching the 
+    knowledge base or local files.
+
+    Args:
+        answer: The text message to send to the user.
+
+    Returns:
+        The same answer string.
+    """
+    return answer
+
+
+@tool
 def csv_query(filename: str, query_json_str: str) -> str:
     """Query a CSV file using a structured JSON containing 'condition' and 'columns'.
 
@@ -470,7 +508,9 @@ ALL_TOOLS = [
     web_fetch,
     local_file_qa,
     csv_info,
-    csv_query
+    csv_query,
+    rag_query,
+    direct_response,
 ]
 
 # NOTE: Cannot set arbitrary attributes on Pydantic StructuredTool objects.
@@ -497,6 +537,7 @@ def _get_run_python():
 
 def get_skill_tools():
     """Return the full tool list for the skill agent (ALL_TOOLS + atomic write tools)."""
+    # rag_query is already in ALL_TOOLS; atomic write tools are added separately
     return ALL_TOOLS + [_get_write_file(), _get_run_python()]
 
 

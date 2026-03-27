@@ -28,6 +28,8 @@ from .renderer import SkillRenderer
 from .router import route_intent
 from .session import Session
 
+
+
 logger = logging.getLogger(__name__)
 
 BUILTIN_COMMANDS = {"help", "?", "skills", "exit", "quit"}
@@ -58,7 +60,7 @@ class SkillShell:
         self.temp_path = temp_path
         self.llm = llm
         self.renderer = SkillRenderer(console or Console())
-        self.session_history: list[str] = []  # in-memory for this session only
+        self.session_history: list[str] = []  # bare command strings (for readline / help display)
         self._tool_list = get_skill_tools()
         self._tool_map = {t.name: t for t in self._tool_list}
         self._session: Optional[Session] = None
@@ -69,6 +71,12 @@ class SkillShell:
 
     def start(self, data_folder: Path) -> None:
         """Start the REPL loop."""
+        # 0. Garbage collect old python_code and temp runs (> 24h)
+        if self.python_code_path.exists():
+            removed = Session.garbage_collect(self.python_code_path, days=1)
+            if removed > 0:
+                self.renderer.print_info(f"[dim]🧹 Cleaned up {removed} old run directories.[/dim]")
+
         self.renderer.print_banner(len(self.skills), data_folder)
         if self.input_path:
             self.renderer.print_info(
@@ -253,45 +261,67 @@ class SkillShell:
         self.renderer.print_info("🔍 Routing intent...")
         route = route_intent(resolved, self.skills, self.llm)
 
-        skill_def: Optional[SkillDef] = None
+        result: str = ""
+
         if route.route == "skill" and route.skill_id:
+            # ── Skill path: matched playbook → plan → approve → execute ──────
             skill_def = self.skills.get(route.skill_id)
             self.renderer.print_info(f"🧩 Matched skill: [cyan]{route.skill_id}[/cyan]")
             self._session.skill_name = route.skill_id
+
+            plan = generate_plan(resolved, self._session, self.llm, skill_def)
+            if not plan:
+                self.renderer.print_error("Could not generate a plan for this command.")
+                return
+
+            plan = self._approval_gate(plan)
+            if plan is None:
+                return  # User quit
+
+            cancel_token = CancellationToken()
+            executor = SkillExecutor(self.renderer, self.llm)
+
+            log_audit("skill_execute_start", {"command": command[:200], "steps": len(plan)})
+            self._session.write_manifest()
+
+            try:
+                with InterruptHandler(cancel_token):
+                    result = executor.execute_plan(plan, self._session, self._tool_map, cancel_token)
+
+                if result:
+                    self.renderer.print_result(result, title="Execution Complete")
+
+                log_audit("skill_execute_done", {"command": command[:200]})
+            finally:
+                self._session.cleanup()
+
         else:
-            self.renderer.print_info("🤖 Free-agent mode — generating plan...")
+            # ── Free-agent path: generate_plan → approve → execute (no skill_def) ──
+            plan = generate_plan(resolved, self._session, self.llm, skill_def=None)
+            if not plan:
+                self.renderer.print_error("Could not generate a plan for this command.")
+                return
 
-        # 2. Generate plan (use resolved command so LLM gets real path)
-        plan = generate_plan(resolved, self._session, self.llm, skill_def)
+            plan = self._approval_gate(plan)
+            if plan is None:
+                return  # User quit
 
-        if not plan:
-            self.renderer.print_error("Could not generate a plan for this command.")
-            return
+            cancel_token = CancellationToken()
+            executor = SkillExecutor(self.renderer, self.llm)
 
-        # 3. Approval gate
-        plan = self._approval_gate(plan)
-        if plan is None:
-            return  # User quit
+            log_audit("free_agent_execute_start", {"command": command[:200], "steps": len(plan)})
+            self._session.write_manifest()
 
-        # 4. Execute plan with interrupt support
-        cancel_token = CancellationToken()
-        executor = SkillExecutor(self.renderer, self.llm)
+            try:
+                with InterruptHandler(cancel_token):
+                    result = executor.execute_plan(plan, self._session, self._tool_map, cancel_token)
 
-        log_audit("skill_execute_start", {"command": command[:200], "steps": len(plan)})
-        self._session.write_manifest()
+                if result:
+                    self.renderer.print_result(result, title="Answer")
 
-        try:
-            with InterruptHandler(cancel_token):
-                result = executor.execute_plan(plan, self._session, self._tool_map, cancel_token)
-
-            # 5. Show result
-            if result:
-                self.renderer.print_result(result, title="Execution Complete")
-
-            log_audit("skill_execute_done", {"command": command[:200]})
-        finally:
-            # Deep clean session resources (e.g. python_code folders)
-            self._session.cleanup()
+                log_audit("free_agent_execute_done", {"command": command[:200]})
+            finally:
+                self._session.cleanup()
 
     def _approval_gate(self, plan: list) -> Optional[list]:
         """

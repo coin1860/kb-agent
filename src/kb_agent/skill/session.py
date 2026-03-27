@@ -115,11 +115,49 @@ class Session:
         }
 
     def cleanup(self) -> None:
-        """Deep clean any temporary resources (like the python_code_dir and temp_dir)."""
+        """Deep clean run-scoped temporary resources (specifically temp_dir).
+        
+        The python_code_dir is NOT cleaned here as it may contain scripts
+        and logs the user wants to inspect. It is cleaned up via
+        Session.garbage_collect() during CLI startup.
+        """
         import shutil
-        for dir_to_clean in (self.python_code_dir, self.temp_dir):
-            if dir_to_clean and dir_to_clean.exists():
-                try:
-                    shutil.rmtree(dir_to_clean, ignore_errors=True)
-                except Exception:
-                    pass
+        if self.temp_dir and self.temp_dir.exists():
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def garbage_collect(base_path: Path, days: int = 1) -> int:
+        """
+        Find and remove run directories (UUID4 names) older than 'days'.
+        
+        Returns:
+            The number of directories removed.
+        """
+        import shutil
+        import time
+        if not base_path.exists():
+            return 0
+
+        now = time.time()
+        threshold = days * 86400  # seconds in a day
+        removed_count = 0
+
+        # Pattern for UUID4 names (e.g. b01fdd4c-0da0-40b4-b1a8-7a6f802ce6e7)
+        uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        import re
+
+        for item in base_path.iterdir():
+            if item.is_dir() and re.match(uuid_pattern, item.name):
+                # Check modification time of the directory itself
+                mtime = item.stat().st_mtime
+                if (now - mtime) > threshold:
+                    try:
+                        shutil.rmtree(item, ignore_errors=True)
+                        removed_count += 1
+                    except Exception:
+                        pass
+        
+        return removed_count

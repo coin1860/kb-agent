@@ -32,16 +32,41 @@ def _get_data_folder() -> Path:
 
 def _safe_resolve(relative_path: str, base: Path) -> Path:
     """
-    Resolve a relative path under base, raising SecurityError on traversal.
+    Resolve a relative path, prioritizing dedicated settings paths (python_code/, output/, temp/).
     """
+    import kb_agent.config as config
+    settings = config.settings
+    
+    raw = Path(relative_path)
+    parts = raw.parts
+    
+    # Check for dedicated prefix and switch base if necessary
+    if parts and settings:
+        if parts[0] == "python_code" and settings.python_code_path:
+            base = Path(settings.python_code_path).resolve()
+            relative_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
+        elif parts[0] == "output" and settings.output_path:
+            base = Path(settings.output_path).resolve()
+            relative_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
+        elif parts[0] == "temp" and settings.temp_path:
+            base = Path(settings.temp_path).resolve()
+            relative_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
+
     resolved = (base / relative_path).resolve()
     try:
+        # Security check: must be under the chosen base
         resolved.relative_to(base.resolve())
     except ValueError:
-        raise SecurityError(
-            f"Path traversal detected: '{relative_path}' resolves outside of "
-            f"data_folder '{base}'"
-        )
+        # Fallback security check: if NOT under chosen base, must at least be under data_folder
+        # (Allows writing to a shared data_folder root if prefixes aren't being used strictly)
+        data_folder = _get_data_folder().resolve()
+        try:
+            resolved.relative_to(data_folder)
+        except ValueError:
+            raise SecurityError(
+                f"Path traversal detected: '{relative_path}' resolves outside allowed "
+                f"base '{base}' and data_folder '{data_folder}'"
+            )
     return resolved
 
 

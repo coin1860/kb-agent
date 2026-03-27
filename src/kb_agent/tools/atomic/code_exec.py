@@ -8,6 +8,7 @@ Requires explicit user approval before execution (requires_approval=True).
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,36 +43,38 @@ def _get_data_folder() -> Path:
 
 def _safe_script_path(script_path: str, base: Path) -> Path:
     """
-    Resolve script_path to an absolute path that is under `base` (or data_folder).
-
-    Accepts:
-    - Absolute paths already under data_folder
-    - Relative paths resolved against base
-    - Relative paths that, when joined to data_folder, remain inside data_folder
-
-    Raises SecurityError if the resolved path escapes data_folder.
+    Resolve script_path, prioritizing dedicated settings paths (especially python_code/).
     """
-    data_folder = _get_data_folder()
+    import kb_agent.config as config
+    settings = config.settings
+    data_folder = _get_data_folder().resolve()
+    
     raw = Path(script_path)
+    parts = raw.parts
+    
+    # Check for dedicated prefix and switch base if necessary
+    if parts and settings:
+        if parts[0] == "python_code" and settings.python_code_path:
+            base = Path(settings.python_code_path).resolve()
+            script_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
+        elif parts[0] == "output" and settings.output_path:
+            base = Path(settings.output_path).resolve()
+            script_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
+        elif parts[0] == "temp" and settings.temp_path:
+            base = Path(settings.temp_path).resolve()
+            script_path = os.path.join(*parts[1:]) if len(parts) > 1 else "."
 
     if raw.is_absolute():
         resolved = raw.resolve()
     else:
-        # Try resolving relative to python_code_path first, then data_folder
-        candidate_base = (base / script_path).resolve()
-        candidate_data = (data_folder / script_path).resolve()
-        # Prefer whichever exists; otherwise use the data_folder candidate
-        if candidate_base.exists():
-            resolved = candidate_base
-        else:
-            resolved = candidate_data
+        resolved = (base / script_path).resolve()
 
-    # Allow any path under data_folder (covers both python_code/ and output/ subdirs)
+    # Security check: Allow any path under base or data_folder
     resolved_str = str(resolved)
     if not (resolved_str.startswith(str(base)) or resolved_str.startswith(str(data_folder))):
         raise SecurityError(
             f"Script path '{script_path}' resolves to '{resolved}' which is "
-            f"outside allowed data folder '{data_folder}'"
+            f"outside allowed base '{base}' and data folder '{data_folder}'"
         )
     return resolved
 
