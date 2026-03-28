@@ -300,13 +300,7 @@ class SkillShell:
         # ── Chitchat shortcut ───────────────
         if route_type == "chitchat":
             self.renderer.print_info("[dim]💬 Direct response[/dim]")
-            try:
-                from langchain_core.messages import HumanMessage
-                response = self.llm.invoke([HumanMessage(content=resolved)])
-                answer = response.content.strip()
-            except Exception as e:
-                logger.warning("Chitchat LLM call failed: %s", e)
-                answer = "Sorry, I encountered an error."
+            answer = summary
             self.renderer.print_result(answer, title="Reply")
             log_audit("chitchat_response", {"command": resolved[:200]})
             return
@@ -399,6 +393,7 @@ class SkillShell:
             # ── Tool call ─────────────────────────────────────────────────
             tool_name = action.get("tool", "")
             args = action.get("args", {})
+            tool_call_id = action.get("tool_call_id", f"call_legacy_i{iteration}")
 
             self.renderer.print_dynamic_step_header(iteration, max_iter, reason)
             self.renderer.print_think(reason or f"Calling {tool_name}")
@@ -419,6 +414,7 @@ class SkillShell:
                     tool_history.append({
                         "step": iteration, "tool": tool_name, "args": args,
                         "result": "[user skipped]", "status": "skipped",
+                        "tool_call_id": tool_call_id,
                     })
                     continue
 
@@ -456,6 +452,7 @@ class SkillShell:
                 "args": args,
                 "result": result_str,
                 "status": status,
+                "tool_call_id": tool_call_id,
             })
 
         return final_answer
@@ -582,6 +579,7 @@ This summary will be passed as context to subsequent milestones.
             tool_name = action.get("tool", "")
             args = action.get("args", {})
             finish_flag = action.get("finish_milestone", False)
+            tool_call_id = action.get("tool_call_id", f"call_m{milestone_index}_i{iteration}")
 
             self.renderer.print_dynamic_step_header(iteration, max_iter, reason)
 
@@ -600,6 +598,7 @@ This summary will be passed as context to subsequent milestones.
                     tool_history.append({
                         "step": iteration, "tool": tool_name, "args": args,
                         "result": "[user skipped]", "status": "skipped",
+                        "tool_call_id": tool_call_id,
                     })
                     # Skipped steps do NOT advance iteration count
                     continue
@@ -630,6 +629,7 @@ This summary will be passed as context to subsequent milestones.
                 "args": args,
                 "result": result_str,
                 "status": "success",
+                "tool_call_id": tool_call_id,
             })
             log_audit("milestone_step_done", {"tool": tool_name, "milestone": milestone_index})
 

@@ -510,7 +510,12 @@ def plan_node(state: AgentState) -> dict[str, Any]:
             )
         )
 
-    messages.append(HumanMessage(content=query))
+    # Defensive check: avoid consecutive HumanMessages which causes HTTP 400 on some providers
+    if messages and isinstance(messages[-1], HumanMessage):
+        if query not in str(messages[-1].content):
+            messages[-1].content = str(messages[-1].content) + f"\n\n{query}"
+    else:
+        messages.append(HumanMessage(content=query))
 
     response: AIMessage = _invoke_and_track(llm, messages, state)
     raw_response = response.content.strip()
@@ -1450,7 +1455,12 @@ def analyze_and_route_node(state: AgentState) -> dict[str, Any]:
     llm = _build_llm()
     messages = [SystemMessage(content=ANALYZE_AND_ROUTE_SYSTEM)]
     messages.extend(_history_to_messages(history))
-    messages.append(HumanMessage(content=query))
+    # Defensive check: avoid consecutive HumanMessages which causes HTTP 400 on some providers
+    if messages and isinstance(messages[-1], HumanMessage):
+        if query not in str(messages[-1].content):
+            messages[-1].content = str(messages[-1].content) + f"\n\n{query}"
+    else:
+        messages.append(HumanMessage(content=query))
     
     response = _invoke_and_track(llm, messages, state)
     raw = _strip_think_tags(response.content.strip())

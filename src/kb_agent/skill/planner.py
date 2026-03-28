@@ -20,10 +20,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import ast
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage, AIMessage, ToolMessage
 
 from kb_agent.audit import log_audit
 from .loader import SkillDef, expand_skill_content
@@ -33,30 +34,13 @@ logger = logging.getLogger(__name__)
 
 APPROVAL_TOOLS = {"write_file", "run_python", "confluence_create_page", "confluence_update_page"}
 
-SKILL_TOOLS_DESCRIPTION = """\
-Available tools (with approval requirement):
-1. vector_search(query: str) — Semantic search over ChromaDB knowledge base. [no approval]
-   ⚠️  Use descriptive natural language (e.g. 'Information about Shane\\'s role and projects') rather than keywords like 'Shane'. 
-   Use ONLY when a user question cannot be answered directly and requires semantic retrieval.
-2. read_file(file_path: str) — Read a local file by path. [no approval]
-3. jira_fetch(issue_key: str) — Fetch a Jira ticket by key (e.g. PROJ-123). [no approval]
-4. jira_jql(query: str) — Search Jira using natural language query. [no approval]
-5. confluence_fetch(page_id: str) — Fetch a Confluence page by ID. [no approval]
-6. confluence_create_page(parent_id: str, title: str, content: str) — Create a new Confluence page. [REQUIRES APPROVAL]
-7. web_fetch(url: str) — Fetch a web page and convert to Markdown. [no approval]
-8. local_file_qa(filename_prefix: str) — Read a local file from datastore. [no approval]
-9. csv_info(filename: str) — Get CSV schema and sample. [no approval]
-10. csv_query(filename: str, query_json_str: str) — Query a CSV file. [no approval]
-11. write_file(path: str, content: str, mode: str) — Write/delete a file under data_folder.
-    mode: 'create' | 'overwrite' | 'append' | 'delete'. [REQUIRES APPROVAL]
-12. run_python(script_path: str, timeout_seconds: int=60) — Execute a Python script. [REQUIRES APPROVAL]
-13. rag_query(query: str) — Full RAG pipeline query over the knowledge base (semantic search + synthesis).
-    [no approval] ⚠️  Use a complete, descriptive question in natural language. ONLY use this tool when the
-    user explicitly mentions RAG or knowledge base search. Do NOT use for general questions
-    that do not explicitly request RAG retrieval.
-14. direct_response(answer: str) — Respond directly to the user with a message or chitchat.
-    Use this for greetings, simple pleasantries, or questions you can answer without any external data.
-"""
+def _get_legacy_tools_description() -> str:
+    from kb_agent.agent.tools import get_skill_tools
+    tools = get_skill_tools()
+    lines = ["Available tools (with approval requirement):"]
+    for idx, t in enumerate(tools, 1):
+        lines.append(f"{idx}. {t.name} - {getattr(t, 'description', '')}")
+    return "\n".join(lines)
 
 PLANNER_SYSTEM = """\
 You are a task execution planner. Given a user command and optional skill playbook,
@@ -204,7 +188,7 @@ def generate_plan(
         List of PlanStep objects in execution order.
     """
     system_prompt = PLANNER_SYSTEM.format(
-        tools_section=SKILL_TOOLS_DESCRIPTION,
+        tools_section=_get_legacy_tools_description(),
         run_id=session.run_id,
     )
 
@@ -268,7 +252,7 @@ def replan(
         Revised list of PlanStep objects.
     """
     system_prompt = REPLAN_SYSTEM.format(
-        tools_section=SKILL_TOOLS_DESCRIPTION,
+        tools_section=_get_legacy_tools_description(),
     )
 
     remaining_json = json.dumps([s.to_dict() for s in remaining_steps], ensure_ascii=False, indent=2)
@@ -310,7 +294,10 @@ Task Types (Routes):
 - free_agent: The command requires tools/actions but does not match any specific skill.
 
 Intent Preview:
-Provide a 1-2 sentence summary of what you plan to do, and determine if the task requires sensitive write operations (writing files or running code).
+Provide a brief summary of what you plan to do. 
+- **CRITICAL**: If the route is 'chitchat', the 'summary' MUST be the actual final natural-language response to the user (e.g., "Hello! How can I help you today?").
+- For other routes, provide a 1-2 sentence summary of the plan.
+- Determine if the task requires sensitive write operations (writing files or running code).
 
 Milestone Planning (only if route is 'skill' or 'free_agent'):
 Decompose the task into an ordered list of 1-5 coarse, verifiable milestones before any tools are called. Each milestone describes a GOAL and an EXPECTED OUTPUT.
@@ -327,7 +314,7 @@ OUTPUT: Return ONLY a JSON object with this exact schema:
 {{
   "route": "chitchat" | "skill" | "free_agent",
   "skill_id": "<skill name or null>",
-  "summary": "<intent summary>",
+  "summary": "<the actual response for chitchat, OR a 1-2 sentence intent summary for others>",
   "has_write_ops": <true or false>,
   "milestones": [
     {{
@@ -515,19 +502,22 @@ Rules:
 - When using semantic search tools (vector_search, rag_query, jira_jql), ALWAYS use descriptive natural language queries (e.g., "Find information about Shane's roles and projects") instead of single keywords (e.g., "Shane").
 - If a skill playbook is provided, you MUST execute its steps in order without skipping
 - Do NOT call the same tool with identical args twice (check history)
-- If iteration >= max_iterations, you MUST output final_answer immediately (even partial)
+- If iteration >= max_iterations, you MUST use the direct_response or final answer tool immediately (even partial)
 - Use the run_id '{run_id}' in 'python_code/' paths (e.g. 'python_code/{run_id}/step_1.py')
 - For file outputs, use 'output/' prefix (e.g. 'output/report.md')
 - For temporary intermediate files, use 'temp/' prefix (e.g. 'temp/data.json')
 - If you need to execute Python code, you MUST FIRST use 'write_file' to save the script before using 'run_python' to execute it.
 - Ensure all required files exist (via write_file or previous tool outputs) before they are used as arguments in subsequent tool calls.
-- Include a brief "reason" field explaining why you chose this action
 
-OUTPUT: Return ONLY valid JSON — one of:
-{{"action": "call_tool", "tool": "<tool_name>", "args": {{...}}, "reason": "<why>", "finish_milestone": <true/false>}}
-{{"action": "final_answer", "answer": "<full answer to user>"}}
+**CRITICAL TOOL CALLING FORMAT**:
+- You MUST use the native tool calling mechanism.
+- Do NOT wrap your output in <function> or any other XML tags.
+- Output ONLY the tool call.
+- Use JSON-compatible types (e.g., true/false for booleans, not strings "true"/"false").
 
-Do NOT include any text outside the JSON.
+**CRITICAL: You must output tool calls in PURE JSON format. NEVER use tags like <function> or markdown code blocks. The response must be a valid JSON object or list and nothing else.**
+
+OUTPUT: Return a tool call. If the task is fully achieved and you want to reply to the user directly, please invoke the `direct_response` tool.
 """
 
 PREVIEW_INTENT_SYSTEM = """\
@@ -549,20 +539,85 @@ Do NOT include any text outside the JSON.
 """
 
 
-def _build_tool_history_str(tool_history: list[dict[str, Any]]) -> str:
-    """Format tool_history list into a readable string for the LLM prompt."""
-    if not tool_history:
-        return "(none)"
-    parts = []
-    for entry in tool_history:
-        step = entry.get("step", "?")
-        tool = entry.get("tool", "?")
-        args_str = json.dumps(entry.get("args", {}), ensure_ascii=False)[:200]
-        result = str(entry.get("result", ""))[:2000]
-        status = entry.get("status", "?")
-        parts.append(f"Step {step} [{status}]: {tool}({args_str})\nResult: {result}")
-    return "\n\n".join(parts)
+def _truncate_messages(messages: list[BaseMessage], max_messages: int = 20) -> list[BaseMessage]:
+    """Keep system prompt and the N latest messages, ensuring AIMessage-ToolMessage pairs stay together."""
+    if len(messages) <= max_messages:
+        return messages
+    
+    # We always keep the first message (SystemMessage)
+    system_msg = messages[0]
+    others = messages[1:]
+    
+    # Take the last N-1 messages
+    truncated = others[-(max_messages-1):]
+    
+    # If the first message in our truncation is a ToolMessage, it means we cut off its AIMessage.
+    # To keep the history valid, we drop that orphaned ToolMessage.
+    if truncated and isinstance(truncated[0], ToolMessage):
+        truncated = truncated[1:]
+        
+    return [system_msg] + truncated
 
+def _build_message_history(
+    command: str,
+    tool_history: list[dict[str, Any]],
+    milestone_goal: Optional[str] = None,
+    prior_context: Optional[str] = None,
+    skill_def: Optional[SkillDef] = None,
+    session_run_id: str = "",
+    iteration: int = 1,
+    max_iterations: int = 3,
+) -> list[BaseMessage]:
+    """Build LangChain message history from the task state for bind_tools."""
+    sys_parts = [DECIDE_NEXT_STEP_SYSTEM.format(
+        run_id=session_run_id,
+        tools_section=_get_legacy_tools_description()
+    )]
+    system_msg = SystemMessage(content="\n".join(sys_parts))
+    
+    user_parts = [f"User command: {command}"]
+    if milestone_goal:
+        user_parts.append(f"\n🎯 CURRENT MILESTONE GOAL (focus ONLY on this):\n{milestone_goal}")
+    if prior_context:
+        user_parts.append(f"\n📋 Prior milestone context:\n{prior_context}")
+    if skill_def:
+        expanded = expand_skill_content(skill_def)
+        user_parts.append(f"\n⚠️  SKILL PLAYBOOK HARD CONSTRAINT:\n'{skill_def.name}':\n{expanded}")
+    
+    messages: list[BaseMessage] = [system_msg, HumanMessage(content="\n".join(user_parts))]
+    
+    for entry in tool_history:
+        tool_name = entry.get("tool", "")
+        args = entry.get("args", {})
+        result = str(entry.get("result", ""))
+        status = entry.get("status", "")
+        call_id = entry.get("tool_call_id", f"call_{entry.get('step', '0')}")
+        
+        if status == "skipped":
+            result = "[user skipped]"
+            
+        ai_msg = AIMessage(
+            content="", 
+            tool_calls=[{"name": tool_name, "args": args, "id": call_id}]
+        )
+        tool_msg = ToolMessage(content=result, name=tool_name, tool_call_id=call_id)
+        messages.extend([ai_msg, tool_msg])
+        
+    iter_prompt = f"\n\nIteration: {iteration} / {max_iterations}"
+    if iteration >= max_iterations:
+        iter_prompt += "\n🚨 MAX ITERATIONS REACHED. You MUST query `direct_response` to output the final answer now."
+    
+    # Instead of appending a new HumanMessage (which causes consecutive user messages and HTTP 400),
+    # we append the iteration info to the last HumanMessage in the list.
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            messages[i].content = str(messages[i].content) + iter_prompt
+            break
+    else:
+        # Fallback if no HumanMessage found (shouldn't happen with our construction)
+        messages.append(HumanMessage(content=iter_prompt))
+    
+    return _truncate_messages(messages)
 
 def decide_next_step(
     command: str,
@@ -576,56 +631,22 @@ def decide_next_step(
     prior_context: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    Ask the LLM to decide the single next action based on command + history.
-
-    Returns one of:
-      {"action": "call_tool",    "tool": str, "args": dict, "reason": str}
-      {"action": "final_answer", "answer": str}
+    Ask the LLM to decide the single next action natively using bind_tools().
     """
+    from kb_agent.agent.tools import get_skill_tools
+    
     tool_history = tool_history or []
-
-    # Build system prompt
-    system_prompt = DECIDE_NEXT_STEP_SYSTEM.format(
-        tools_section=SKILL_TOOLS_DESCRIPTION,
-        run_id=session.run_id,
+    
+    messages = _build_message_history(
+        command=command,
+        tool_history=tool_history,
+        milestone_goal=milestone_goal,
+        prior_context=prior_context,
+        skill_def=skill_def,
+        session_run_id=session.run_id,
+        iteration=iteration,
+        max_iterations=max_iterations,
     )
-
-    # Build user message
-    parts = [f"User command: {command}"]
-
-    # Inject current milestone goal (focuses executor on sub-task)
-    if milestone_goal:
-        parts.append(
-            f"\n🎯 CURRENT MILESTONE GOAL (focus ONLY on this):\n{milestone_goal}"
-        )
-
-    # Inject compressed summaries of completed prior milestones
-    if prior_context:
-        parts.append(
-            f"\n📋 Prior milestone context (already completed — do NOT redo this work):\n{prior_context}"
-        )
-
-    # Inject skill playbook as hard constraint
-    if skill_def:
-        expanded = expand_skill_content(skill_def)
-        parts.append(
-            f"\n⚠️  SKILL PLAYBOOK HARD CONSTRAINT — you MUST follow these steps in order:\n"
-            f"Playbook '{skill_def.name}':\n{expanded}"
-        )
-
-    parts.append(f"\nRun ID for file paths: {session.run_id}")
-    parts.append(f"\nIteration: {iteration} / {max_iterations}")
-
-    history_str = _build_tool_history_str(tool_history)
-    parts.append(f"\nTool history so far:\n{history_str}")
-
-    if iteration > max_iterations:
-        parts.append(
-            "\n🚨 MAX ITERATIONS REACHED. You MUST output final_answer now, "
-            "even if your answer is partial. Do not call any more tools."
-        )
-
-    user_msg = "\n".join(parts)
 
     log_audit("skill_decide_start", {
         "command": command[:200],
@@ -634,34 +655,95 @@ def decide_next_step(
     })
 
     try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_msg),
-        ])
-        raw = response.content.strip()
-        # Strip think tags
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-        # Strip code fences
-        if "```" in raw:
-            parts_list = raw.split("```")
-            if len(parts_list) >= 3:
-                fenced = parts_list[1]
-                if fenced.startswith("json"):
-                    fenced = fenced[4:]
-                raw = fenced.strip()
-
-        action = json.loads(raw)
-        if not isinstance(action, dict) or "action" not in action:
-            raise ValueError(f"Unexpected decide_next_step response shape: {action}")
-
-        log_audit("skill_decide_result", {"action": action.get("action"), "tool": action.get("tool")})
-        return action
-
+        tools = get_skill_tools()
+        llm_with_tools = llm.bind_tools(tools)
+        response = llm_with_tools.invoke(messages)
+        
+        # 1. Native tool_calls (standard path)
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tc = response.tool_calls[0]
+            return _format_tool_response(tc, response.content)
+            
+        # 2. Text-based tool calls (fallback for llama3/etc. that bypass the validator)
+        content = str(response.content or "")
+        tool_pattern = r"<function=(\w+)(.*?)>(</function>|$)"
+        match = re.search(tool_pattern, content, re.DOTALL)
+        if match:
+            tool_name = match.group(1)
+            args_raw = match.group(2).strip()
+            args = _parse_args_safely(args_raw)
+            logger.info("Extracted tool call from response content: %s", tool_name)
+            return _format_tool_response({"name": tool_name, "args": args, "id": f"text_{iteration}"}, content)
+            
+        # 3. Final answer (no tool calls)
+        log_audit("skill_decide_result", {"action": "final_answer", "tool": "none"})
+        return {
+            "action": "final_answer",
+            "answer": response.content
+        }
+            
     except Exception as e:
         logger.error("decide_next_step failed (iter %d): %s", iteration, e)
+        
+        # 4. Global robust fallback for errors (e.g. 400 error with XML tags in failed_generation)
+        # We search the ENTIRE error message for <function=... tags.
+        error_msg = str(e)
+        match = re.search(r"<function=(\w+)(.*?)>(</function>|$|\n)", error_msg, re.DOTALL)
+        if match:
+            tool_name = match.group(1)
+            args = _parse_args_safely(match.group(2).strip())
+            logger.info("Successfully extracted tool call from error message: %s", tool_name)
+            return _format_tool_response({"name": tool_name, "args": args, "id": f"err_fallback_{iteration}"}, error_msg)
+
         return {
             "action": "final_answer",
             "answer": f"Sorry, I encountered an error while planning your request: {command}",
+        }
+
+def _parse_args_safely(raw: str) -> dict:
+    """Best-effort JSON argument parsing for messy LLM outputs."""
+    if not raw:
+        return {}
+    try:
+        # 1. Direct JSON
+        return json.loads(raw)
+    except:
+        # 2. Extract first {...} blob
+        json_match = re.search(r"({.*})", raw, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except:
+                pass
+        return {}
+
+def _format_tool_response(tc: dict | Any, raw_content: str) -> dict:
+    """Consistency wrapper for tool call responses."""
+    if isinstance(tc, dict):
+        name = tc.get("name", "")
+        args = tc.get("args", {})
+        call_id = tc.get("id", "unknown")
+    else:
+        name = tc.name
+        args = tc.args
+        call_id = tc.id
+
+    if name == "direct_response":
+        log_audit("skill_decide_result", {"action": "final_answer", "tool": "direct_response"})
+        return {
+            "action": "final_answer",
+            "answer": args.get("answer", raw_content),
+            "tool_call_id": call_id
+        }
+    else:
+        log_audit("skill_decide_result", {"action": "call_tool", "tool": name})
+        return {
+            "action": "call_tool",
+            "tool": name,
+            "args": args,
+            "reason": raw_content or f"Calling {name}",
+            "tool_call_id": call_id,
+            "finish_milestone": False
         }
 
 
