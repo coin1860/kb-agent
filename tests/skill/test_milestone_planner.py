@@ -18,14 +18,20 @@ import pytest
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_llm(content: str):
+def _make_llm(content: str = "", tool_calls=None):
     """Create a mock LLM that always returns fixed content."""
     llm = MagicMock()
     msg = MagicMock()
     msg.content = content
+    msg.tool_calls = tool_calls or []
     msg.usage_metadata = {"output_tokens": 42}
     llm.invoke.return_value = msg
+    
+    bound_llm = MagicMock()
+    bound_llm.invoke.return_value = msg
+    llm.bind_tools.return_value = bound_llm
     return llm
+
 
 
 def _make_session(run_id: str = "test-run-abc"):
@@ -214,8 +220,8 @@ def test_decide_milestone_goal_appears_in_prompt():
     """When milestone_goal is passed, it appears in the LLM user message."""
     from kb_agent.skill.planner import decide_next_step
 
-    payload = {"action": "final_answer", "answer": "done"}
-    llm = _make_llm(json.dumps(payload))
+    tool_calls = [{"name": "direct_response", "args": {"answer": "done"}, "id": "call_1"}]
+    llm = _make_llm(tool_calls=tool_calls)
     session = _make_session()
 
     decide_next_step(
@@ -225,8 +231,8 @@ def test_decide_milestone_goal_appears_in_prompt():
         milestone_goal="Fetch Jira tickets for project PROJ",
     )
 
-    llm.invoke.assert_called_once()
-    call_args = llm.invoke.call_args[0][0]
+    llm.bind_tools.return_value.invoke.assert_called_once()
+    call_args = llm.bind_tools.return_value.invoke.call_args[0][0]
     user_msg = call_args[1].content
     assert "Fetch Jira tickets for project PROJ" in user_msg
     assert "CURRENT MILESTONE GOAL" in user_msg
@@ -236,8 +242,8 @@ def test_decide_prior_context_appears_in_prompt():
     """When prior_context is passed, it appears in the LLM user message."""
     from kb_agent.skill.planner import decide_next_step
 
-    payload = {"action": "final_answer", "answer": "done"}
-    llm = _make_llm(json.dumps(payload))
+    tool_calls = [{"name": "direct_response", "args": {"answer": "done"}, "id": "call_1"}]
+    llm = _make_llm(tool_calls=tool_calls)
     session = _make_session()
 
     decide_next_step(
@@ -247,7 +253,7 @@ def test_decide_prior_context_appears_in_prompt():
         prior_context="Milestone 1 retrieved 5 tickets from PROJ.",
     )
 
-    call_args = llm.invoke.call_args[0][0]
+    call_args = llm.bind_tools.return_value.invoke.call_args[0][0]
     user_msg = call_args[1].content
     assert "Milestone 1 retrieved 5 tickets from PROJ." in user_msg
     assert "Prior milestone context" in user_msg
@@ -257,13 +263,13 @@ def test_decide_no_milestone_goal_no_injection():
     """Without milestone_goal, no CURRENT MILESTONE GOAL section in prompt."""
     from kb_agent.skill.planner import decide_next_step
 
-    payload = {"action": "final_answer", "answer": "done"}
-    llm = _make_llm(json.dumps(payload))
+    tool_calls = [{"name": "direct_response", "args": {"answer": "done"}, "id": "call_1"}]
+    llm = _make_llm(tool_calls=tool_calls)
     session = _make_session()
 
     decide_next_step("simple task", session, llm)
 
-    call_args = llm.invoke.call_args[0][0]
+    call_args = llm.bind_tools.return_value.invoke.call_args[0][0]
     user_msg = call_args[1].content
     assert "CURRENT MILESTONE GOAL" not in user_msg
     assert "Prior milestone context" not in user_msg

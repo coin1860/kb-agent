@@ -110,10 +110,67 @@ class MarkdownAwareChunker:
                 meta.update(chunk.metadata)
                 final_chunks.append(Chunk(text=chunk.text, metadata=meta))
                 
-        # Inject standard metadata
+        # Inject standard metadata and contextual prefix
         total = len(final_chunks)
+        doc_title = base_metadata.get("document_title", "")
+        doc_summary = base_metadata.get("document_summary", "")
+
+        prefixed_chunks = []
         for i, c in enumerate(final_chunks):
             c.metadata["chunk_index"] = i
             c.metadata["total_chunks"] = total
             
-        return final_chunks
+            section_title = c.metadata.get("section_title", "")
+            
+            prefix_lines = []
+            if doc_title:
+                prefix_lines.append(f"Document: {doc_title}")
+            if section_title:
+                prefix_lines.append(f"Section: {section_title}")
+            if doc_summary:
+                prefix_lines.append(f"Summary: {doc_summary}")
+                
+            if prefix_lines:
+                prefix = "\n".join(prefix_lines) + "\n\n"
+                c.text = prefix + c.text
+            
+            prefixed_chunks.append(c)
+
+        # --- Post-prefix size validation ---
+        # The contextual prefix is injected after the initial size-based split, so chunks
+        # that were right under max_chars can silently exceed the limit once the prefix
+        # ("Document: …\nSection: …\n\n") is prepended.  Re-split any offending chunks
+        # here, keeping the same prefix on every resulting sub-chunk.
+        validated_chunks: list[Chunk] = []
+        global_idx = 0
+        for c in prefixed_chunks:
+            if len(c.text) <= self.max_chars:
+                c.metadata["chunk_index"] = global_idx
+                validated_chunks.append(c)
+                global_idx += 1
+                continue
+
+            # Find where the prefix ends (first blank line after the header block)
+            sep = "\n\n"
+            sep_pos = c.text.find(sep)
+            if sep_pos != -1:
+                prefix = c.text[: sep_pos + len(sep)]
+                content = c.text[sep_pos + len(sep) :]
+            else:
+                prefix = ""
+                content = c.text
+
+            content_budget = max(100, self.max_chars - len(prefix))
+            sub_texts = split_by_paragraphs(content, content_budget, self.overlap_chars)
+            for sub_text in sub_texts:
+                new_meta = c.metadata.copy()
+                new_meta["chunk_index"] = global_idx
+                validated_chunks.append(Chunk(text=prefix + sub_text, metadata=new_meta))
+                global_idx += 1
+
+        # Update total_chunks to reflect the final count after post-split expansion
+        final_total = len(validated_chunks)
+        for c in validated_chunks:
+            c.metadata["total_chunks"] = final_total
+
+        return validated_chunks

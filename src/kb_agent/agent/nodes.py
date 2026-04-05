@@ -28,6 +28,19 @@ from .tools import ALL_TOOLS
 logger = logging.getLogger("kb_agent_audit")
 
 # ---------------------------------------------------------------------------
+# Shared routing regex constants (single source of truth)
+# ---------------------------------------------------------------------------
+
+# Jira issue key: PROJECT-12345
+_JIRA_KEY_RE = re.compile(r'\b[A-Z][A-Z0-9]{1,9}-\d{3,5}\b')
+
+# Confluence page ID: 5+ digit numeric ID
+_CONFLUENCE_ID_RE = re.compile(r'\b(\d{5,10})\b')
+
+# HTTP/HTTPS URL
+_URL_RE = re.compile(r'https?://\S+')
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -198,15 +211,15 @@ def _extract_json(text: str) -> Any:
 def _is_tool_applicable(tool_name: str, query: str) -> bool:
     """Validate if a tool is applicable to the given query."""
     if tool_name == "jira_fetch":
-        return bool(re.search(r'\b[A-Z][A-Z0-9]{1,9}-\d{3,5}\b', query))
+        return bool(_JIRA_KEY_RE.search(query))
     if tool_name == "csv_query":
         return bool(re.search(r'\.csv', query, re.IGNORECASE))
     if tool_name == "jira_jql":
         return True
     if tool_name == "confluence_fetch":
-        return bool(re.search(r'confluence|wiki|page.?\d+|\b\d{9,10}\b', query, re.IGNORECASE))
+        return bool(re.search(r'confluence|wiki|page.?\d+', query, re.IGNORECASE) or _CONFLUENCE_ID_RE.search(query))
     if tool_name == "web_fetch":
-        return bool(re.search(r'https?://', query))
+        return bool(_URL_RE.search(query))
     return True
 
 
@@ -333,7 +346,7 @@ PLAN_SYSTEM = (
     '   [{"name": "vector_search", "args": {"query": "login flow"}}, '
     '{"name": "read_file", "args": {"file_path": "docs/auth.md"}}]\n'
     "3. Start with vector_search for Q&A. If the question is complex or conceptual, YOU MUST issue multiple vector_search queries in parallel.\n"
-    "   **CRITICAL EXCEPTION**: If the user asks to read or answer questions about a SPECIFIC file by name (e.g. '根据文件银行开户指南', '打开文件X'), you MUST use local_file_qa with the filename prefix INSTEAD of vector_search.\n"
+    "   **CRITICAL EXCEPTION**: ONLY if the user explicitly asks to read or open a SPECIFIC file by using words like 'file', 'read', '打开', '文件' (e.g. '根据文件银行开户指南', '打开文件X'), use local_file_qa. For general 'how to' questions (e.g. 'X如何安装'), ALWAYS use vector_search.\n"
     "4. If the question mentions a Jira ticket (e.g. PROJ-123), use jira_fetch or graph_related.\n"
     "5. After search returns file paths, use read_file to get full content.\n"
     "6. **INDEX RESOLUTION**: When a user refers to a file by index (e.g. 'Summarize 1', 'Tell me about file 2'), you MUST:\n"
@@ -348,65 +361,86 @@ PLAN_SYSTEM = (
     "10. If 'Active Entities' are given, you MUST prioritize tools that fetch those entities directly by ID (e.g. jira_fetch, read_file).\n"
 )
 
-DECOMPOSE_SYSTEM = (
-    "You are a query analysis expert. Your job is to analyze the user's question and decide how to search the knowledge base.\n\n"
-    "RULES:\n"
-    "1. If the user asks about a specific Jira ticket (e.g., FSR-123, WCL-456, PROJ-789), output a 'direct' action for jira_fetch.\n"
-    "2. If the user asks to SEARCH/QUERY/LIST Jira issues by criteria (e.g. 'my tasks', 'unresolved bugs', '本周更新的任务'), output a 'direct' action for jira_jql.\n"
-    "3. **CONFLUENCE ROUTING (HIGH PRIORITY)**: If ANY of the following are true, output a 'direct' action for confluence_fetch:\n"
-    "   - The user mentions 'confluence' followed by a number (e.g., 'confluence 1231231233', 'Confluence页面 1234567890')\n"
-    "   - The user provides a 9-10 digit numeric ID and asks to read/summarize/explain it (e.g., '1231231233中文总结', '总结1234567890', '帮我看看1231231233')\n"
-    "   - The user mentions a Confluence page ID explicitly (e.g., 'page 1234567890')\n"
-    "   - When in doubt about whether a long number is a Confluence page ID, PREFER routing to confluence_fetch\n"
-    "   Use the numeric ID as the page_id argument.\n"
-    "4. If the user asks to query, analyze, or read a .csv file (e.g., 'query dataset.csv for users over 30...'), output a 'direct' action for csv_query with the extracted filename and your intended query_json_str.\n"
-    "5. If the user asks to read, open, or answer questions about a SPECIFIC file by its name (e.g., '打开文件信用卡申请流程.txt', '根据银行开户指南...'), output a 'direct' action for local_file_qa with the extracted filename_prefix.\n"
-    "6. For all other questions, output a 'decompose' action that splits the question into exactly 3 diverse, atomic sub-queries for parallel vector search.\n"
-    "   - Sub-queries should capture different aspects, synonyms, or keywords of the original question.\n"
-    "   - If the question is very simple, use slightly different phrasing for the 3 sub-queries to maximize recall.\n"
-    "   - MUST KEEP THE ORIGINAL LANGUAGE. DO NOT TRANSLATE TO ENGLISH IF THE QUERY IS IN CHINESE.\n"
-    "7. Output ONLY valid JSON matching this schema:\n"
-    '   - For direct: {"action": "direct", "tool": "jira_fetch", "args": {"issue_key": "FSR-123"}}\n'
-    '   - For direct: {"action": "direct", "tool": "jira_jql", "args": {"query": "my unresolved tasks"}}\n'
-    '   - For direct: {"action": "direct", "tool": "confluence_fetch", "args": {"page_id": "1231231233"}}\n'
-    '   - For direct: {"action": "direct", "tool": "csv_query", "args": {"filename": "dataset.csv", "query_json_str": "{\\"condition\\": \\"Age > 30\\", \\"columns\\": [\\"Name\\"]}"}}\n'
-    '   - For direct: {"action": "direct", "tool": "local_file_qa", "args": {"filename_prefix": "信用卡申请流程"}}\n'
-    '   - For decompose: {"action": "decompose", "sub_queries": ["query 1", "query 2", "query 3"]}\n'
-    "8. Do NOT output any other text or explanation."
+# ---------------------------------------------------------------------------
+# Unified router: replaces the old analyze_and_route + _decompose_query pair.
+# One LLM call handles routing, entity extraction, query resolution AND decomposition.
+# ---------------------------------------------------------------------------
+
+UNIFIED_ROUTER_SYSTEM = (
+    "You are the master router for a Knowledge Base Agent.\n"
+    "Analyze the user's latest question together with the conversation history and output a single JSON decision.\n\n"
+    "ROUTING RULES (check in this order):\n"
+    "R1. If the question can be answered DIRECTLY from the conversation history (e.g. 'translate your last response', "
+    "'hello', 'summarize that'), set route_decision='direct' and sub_queries=[].\n"
+    "R2. If the question mentions a specific Jira ticket key (e.g. FSR-123, WCL-456), "
+    "set route_decision='search' and tool_calls=[{\"name\": \"jira_fetch\", \"args\": {\"issue_key\": \"FSR-123\"}}].\n"
+    "R3. If the question asks to search/list Jira issues by criteria ('my tasks', 'open bugs'), "
+    "set route_decision='search' and tool_calls=[{\"name\": \"jira_jql\", \"args\": {\"query\": \"<natural language criteria>\"}}].\n"
+    "R4. If the question references a Confluence page ID (5-10 digit number, or 'confluence <id>'), "
+    "set route_decision='search' and tool_calls=[{\"name\": \"confluence_fetch\", \"args\": {\"page_id\": \"<id>\"}}].\n"
+    "R5. If the question asks to query/analyze a .csv file, "
+    "set route_decision='search' and tool_calls=[{\"name\": \"csv_query\", \"args\": {\"filename\": \"<file>\", \"query_json_str\": \"<json>\"}}].\n"
+    "R6. If the question asks to READ a specific named file (e.g. '打开文件银行开户指南', 'read file architecture.md'), "
+    "set route_decision='search' and tool_calls=[{\"name\": \"local_file_qa\", \"args\": {\"filename_prefix\": \"<name>\"}}].\n"
+    "   **CRITICAL LIMITATION**: ONLY use R6 if the user explicitly uses words like 'file', 'read', '打开', '文件', or '文档'. General questions like 'How to install X' or 'X如何安装' MUST default to R7.\n"
+    "R7. For all other questions (especially 'how to', general knowledge, or troubleshooting), set route_decision='search' and provide 3 diverse sub_queries for parallel vector search.\n"
+    "   - sub_queries should capture different aspects/synonyms of the original question.\n"
+    "   - KEEP THE ORIGINAL LANGUAGE. DO NOT TRANSLATE.\n\n"
+    "ADDITIONAL RULES:\n"
+    "- If the user refers to something from conversation history (e.g. 'that ticket', 'explain it more'), "
+    "  resolve the reference into a complete standalone query in resolved_query.\n"
+    "- Extract any explicit entity IDs (Jira keys, Confluence IDs, filenames) into active_entities.\n\n"
+    "OUTPUT FORMAT — output ONLY valid JSON, nothing else:\n"
+    '{"route_decision": "direct" | "search", '
+    '"resolved_query": "<standalone query>", '
+    '"active_entities": ["<entity1>", ...], '
+    '"tool_calls": [{"name": "<tool>", "args": {...}}] | [], '
+    '"sub_queries": ["<q1>", "<q2>", "<q3>"] | []}'
 )
 
-def _decompose_query(query: str, state: AgentState) -> list[dict[str, Any]]:
-    """Use LLM to decompose a query into sub-queries or route to a specific tool."""
-    _emit(state, "🧠", "Analyzing query for decomposition or direct routing...")
-    log_audit("agent_decompose_start", {"query": query, "active_entities": state.get("active_entities", [])})
-    
-    llm = _build_llm()
-    messages = [
-        SystemMessage(content=DECOMPOSE_SYSTEM),
-        HumanMessage(content=query)
-    ]
-    
-    response = _invoke_and_track(llm, messages, state)
-    raw = _strip_think_tags(response.content.strip())
-    
-    log_audit("agent_decompose_response", {"raw": raw[:200]})
-    
-    parsed = _extract_json(raw)
-    
-    if isinstance(parsed, dict):
-        action = parsed.get("action")
-        if action == "direct" and "tool" in parsed and "args" in parsed:
-            _emit(state, "🧭", f"LLM Routing: detected exact intent, routing to {parsed['tool']}.")
-            return [{"name": parsed["tool"], "args": parsed["args"]}]
-        elif action == "decompose" and isinstance(parsed.get("sub_queries"), list):
-            sub_queries = parsed["sub_queries"][:3] # cap at 3
-            if sub_queries:
-                _emit(state, "🔀", f"Decomposed into {len(sub_queries)} sub-queries for parallel search.")
-                return [{"name": "vector_search", "args": {"query": sq}} for sq in sub_queries]
-                
-    # Fallback if parsing fails or unexpected format
-    _emit(state, "⚠️", "Decomposition parse failed, falling back to original query.")
-    return [{"name": "vector_search", "args": {"query": query}}]
+
+def _rule_based_route(query: str) -> dict[str, Any] | None:
+    """Fast rule-based pre-routing that avoids an LLM call for unambiguous patterns.
+
+    Returns a partial unified-router result dict if a rule fires, else None.
+    Uses the shared regex constants (_JIRA_KEY_RE, _CONFLUENCE_ID_RE, _URL_RE).
+    """
+    # URL → web_fetch
+    url_match = _URL_RE.search(query)
+    if url_match:
+        return {
+            "route_decision": "search",
+            "resolved_query": query,
+            "active_entities": [url_match.group(0)],
+            "tool_calls": [{"name": "web_fetch", "args": {"url": url_match.group(0)}}],
+            "sub_queries": [],
+        }
+
+    # Jira key → jira_fetch
+    jira_match = _JIRA_KEY_RE.search(query)
+    if jira_match:
+        key = jira_match.group(0)
+        return {
+            "route_decision": "search",
+            "resolved_query": query,
+            "active_entities": [key],
+            "tool_calls": [{"name": "jira_fetch", "args": {"issue_key": key}}],
+            "sub_queries": [],
+        }
+
+    # Confluence page ID: 5-10 digit number
+    conf_match = _CONFLUENCE_ID_RE.search(query)
+    if conf_match:
+        page_id = conf_match.group(1)
+        return {
+            "route_decision": "search",
+            "resolved_query": query,
+            "active_entities": [page_id],
+            "tool_calls": [{"name": "confluence_fetch", "args": {"page_id": page_id}}],
+            "sub_queries": [],
+        }
+
+    return None
 
 
 def plan_node(state: AgentState) -> dict[str, Any]:
@@ -425,11 +459,13 @@ def plan_node(state: AgentState) -> dict[str, Any]:
 
     existing_context = state.get("context") or []
 
-    # --- NEW RULE/LLM ROUTING FOR FIRST ITERATION ---
+    # --- FIRST ITERATION: tool_calls already resolved by unified_router_node ---
     if iteration == 0 and not existing_context:
-        # LLM decompose for Jira detection and vector search splitting
-        tool_calls = _decompose_query(query, state)
-            
+        # The unified_router_node already set pending_tool_calls.
+        # If it produced direct tool calls (Jira/Confluence/etc.), use them as-is.
+        # If it produced sub_queries for vector search, they are already in pending_tool_calls.
+        # Nothing more to do here — pass through whatever the router decided.
+        tool_calls = state.get("pending_tool_calls") or []
         return {
             "pending_tool_calls": tool_calls,
             "llm_call_count": state.get("llm_call_count", 0),
@@ -510,7 +546,12 @@ def plan_node(state: AgentState) -> dict[str, Any]:
             )
         )
 
-    messages.append(HumanMessage(content=query))
+    # Defensive check: avoid consecutive HumanMessages which causes HTTP 400 on some providers
+    if messages and isinstance(messages[-1], HumanMessage):
+        if query not in str(messages[-1].content):
+            messages[-1].content = str(messages[-1].content) + f"\n\n{query}"
+    else:
+        messages.append(HumanMessage(content=query))
 
     response: AIMessage = _invoke_and_track(llm, messages, state)
     raw_response = response.content.strip()
@@ -767,8 +808,24 @@ def tool_node(state: AgentState) -> dict[str, Any]:
             if isinstance(parsed_res, list) and len(parsed_res) > 0 and isinstance(parsed_res[0], dict):
                 formatted_items = []
                 for item in parsed_res:
-                    path = item.get("file_path") or item.get("metadata", {}).get("path") or item.get("metadata", {}).get("source") or item.get("id")
-                    line = item.get("line") or item.get("metadata", {}).get("line") or "1"
+                    # Check metadata["file_path"] explicitly — the vector store stores the
+                    # source path there, but the top-level result dict only has "id", not "file_path".
+                    path = (item.get("file_path")
+                            or item.get("metadata", {}).get("file_path")
+                            or item.get("metadata", {}).get("path")
+                            or item.get("metadata", {}).get("source")
+                            or item.get("id"))
+                    # Use chunk_index as a stable per-chunk line substitute so that
+                    # vector chunks from the same file get unique SOURCE tag keys
+                    # (e.g. path:L0, path:L1 …).  Without this, every chunk that
+                    # lacks an explicit "line" field falls back to "1", making all
+                    # chunks from the same document share the same dedup key and
+                    # collapse to a single item in the deduplication pass below.
+                    _chunk_idx = item.get("metadata", {}).get("chunk_index")
+                    line = (item.get("line")
+                            or item.get("metadata", {}).get("line")
+                            or (str(_chunk_idx) if _chunk_idx is not None else None)
+                            or "1")
                     score = item.get("score")
                     content = item.get("content", str(item))
 
@@ -945,7 +1002,14 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
     # Load thresholds
     from ..config import settings
     max_items = settings.auto_approve_max_items if settings and settings.auto_approve_max_items is not None else 2
-    score_threshold = settings.vector_score_threshold if settings and settings.vector_score_threshold is not None else 0.8
+    # Use grade_auto_approve_threshold (strict, 0.65 default) NOT vector_score_threshold (loose, 0.3).
+    # The vector_score_threshold is just the retrieval lower bound; any result that passed it
+    # may still be semantically irrelevant and needs proper grading.
+    score_threshold = (
+        settings.grade_auto_approve_threshold
+        if settings and settings.grade_auto_approve_threshold is not None
+        else 0.65
+    )
     
     # --- AUTO-APPROVE RULES (FAST-PATH) ---
     tool_history = state.get("tool_history") or []
@@ -957,8 +1021,9 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
         return {"iteration": iteration, "grader_action": "GENERATE", "evidence_scores": [1.0] * len(context_items)}
         
     # 2. READ FILE
-    # If all tools executed in the last round (or all tools total if just one round) are read_file
-    if tool_history and all(t.get("tool") == "read_file" for t in tool_history):
+    # If the most recent tool call was read_file, the evidence is direct file content — auto-approve.
+    # Previously checked ALL tool_history which broke as soon as any prior round used vector_search.
+    if tool_history and tool_history[-1].get("tool") == "read_file":
         _emit(state, "✅", "File content auto-approved (read_file)")
         log_audit("fast_path_hit", {"path_type": "rule_auto_approve", "rule_name": "read_file", "query": state["query"]})
         return {"iteration": iteration, "grader_action": "GENERATE", "evidence_scores": [1.0] * len(context_items)}
@@ -970,18 +1035,15 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
         return {"iteration": iteration, "grader_action": "GENERATE", "evidence_scores": [1.0] * len(context_items)}
         
     # 4. HIGH VECTOR SCORES
-    # Check if all tools were vector_search and all scores are >= threshold
-    # Note: Currently vector_search doesn't explicitly expose scores in a structured way to tool_history easily
-    # without parsing the string output. Let's do a robust check: if any vector_search was used and it returned
-    # results that we can parse scores from, we check them.
-    # To be safe and simple: if we are here, we just check if it's purely a vector_search result and score > threshold.
-    # The spec allows us to parse metadata. We can look at the raw string for "[Score: X.XXX]".
+    # Parse scores from the SOURCE tag format: [SOURCE:path:Lline:S0.9234]
+    # Previous code searched for '[Score: X.XXX]' which never appeared — dead regex.
+    # The actual format written by tool_node is ':S<float>]' inside the tag.
     import re
     all_high_scores = True
     has_vector_scores = False
     
     for item in context_items:
-        score_match = re.search(r'\[Score:\s*([0-9.]+)\]', item)
+        score_match = re.search(r':S([0-9.]+)\]', item)
         if score_match:
             has_vector_scores = True
             score = float(score_match.group(1))
@@ -989,7 +1051,7 @@ def grade_evidence_node(state: AgentState) -> dict[str, Any]:
                 all_high_scores = False
                 break
         else:
-            # If any item doesn't have a score, we can't auto-approve based on vector score
+            # Item has no embedded score (e.g., read_file result) — can't auto-approve on score alone
             all_high_scores = False
             break
             
@@ -1389,94 +1451,139 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
 # Node: ANALYZE AND ROUTE (New Gateway)
 # ---------------------------------------------------------------------------
 
-ANALYZE_AND_ROUTE_SYSTEM = """You are the master router for a Knowledge Base Agent.
-Your job is to analyze the user's latest question in the context of the conversation history.
+def unified_router_node(state: AgentState) -> dict[str, Any]:
+    """Single-LLM router that replaces analyze_and_route + _decompose_query.
 
-RULES:
-1. Determine if the question can be answered DIRECTLY from the conversation history (e.g., "Translate your last response to English", "Summarize that", "Hello").
-   - If yes, output action: "direct".
-2. Determine if the question requires searching the knowledge base or using tools.
-   - If yes, output action: "search".
-3. If the user refers to something from the history (e.g., "What is the status of that Jira ticket?", "Explain it more"), you MUST resolve the pronoun/reference into a complete, standalone query (e.g., "What is the status of FSR-123?").
-4. Extract any explicit "active entities" mentioned in the current query or the strictly relevant history (e.g., Jira keys like "PROJ-123", Confluence IDs like "12345678", or specific filenames).
-5. **CONFLUENCE PAGE IDs**: If the user mentions "confluence" together with a number, or provides a 9-10 digit numeric ID (e.g., "1231231233中文总结", "总结1234567890", "confluence 1231231233"), this ALWAYS requires "search" routing. The numeric ID is a Confluence page ID and must be included in active_entities.
-6. Output ONLY valid JSON matching this schema:
-   {"route_decision": "direct" | "search", "resolved_query": "The rewritten standalone query", "active_entities": ["entity1", "entity2"]}
-7. Do NOT output any other text or explanation.
-"""
-
-def analyze_and_route_node(state: AgentState) -> dict[str, Any]:
-    """Analyze query and history to route to direct synthesis or tool planning."""
+    Responsibilities (one pass):
+    - Detect direct answers (from history)
+    - Detect Jira / Confluence / URL / file / CSV intents → direct tool call
+    - Resolve pronoun references in the query
+    - For ordinary knowledge-base questions:
+        1. Try a direct vector_search first (no LLM needed).
+        2. If the top-scoring result is already high-confidence
+           (>= grade_auto_approve_threshold), skip LLM decomposition and
+           let the single search proceed.
+        3. Otherwise call the LLM once to generate 3 diverse sub-queries.
+    """
     query = state["query"]
     history = state.get("messages") or []
-    
-    # Fast-path for explicit URL fetching (legacy behavior ported)
-    import re
-    url_match = re.search(r'https?://[^\s]+', query)
-    if url_match and not history:
-        _emit(state, "🧭", "Rule routing: detected URL, routing to search.")
+
+    log_audit("agent_unified_router_start", {"query": query})
+
+    # ------------------------------------------------------------------
+    # 1. Rule-based pre-routing (zero LLM calls for common patterns)
+    # ------------------------------------------------------------------
+    rule_result = _rule_based_route(query)
+    if rule_result:
+        tool = rule_result["tool_calls"][0]["name"] if rule_result.get("tool_calls") else "?"
+        _emit(state, "🧭", f"Rule routing: {tool}")
+        log_audit("agent_unified_router_rule", {"tool": tool})
+        pending = rule_result.pop("tool_calls", [])
         return {
-            "route_decision": "search",
-            "resolved_query": query,
-            "active_entities": [url_match.group(0)]
+            **rule_result,
+            "pending_tool_calls": pending,
+            "llm_call_count": state.get("llm_call_count", 0),
+            "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
+            "llm_completion_tokens": state.get("llm_completion_tokens", 0),
+            "llm_total_tokens": state.get("llm_total_tokens", 0),
         }
 
-    # Fast-path for Confluence page IDs: "confluence 1231231233" or bare 9-10 digit IDs
-    confluence_match = re.search(r'confluence\s+(\d{9,10})', query, re.IGNORECASE)
-    if not confluence_match:
-        # Check for bare 9-10 digit numeric ID (e.g., "1231231233中文总结", "总结1234567890")
-        bare_id_match = re.search(r'(\d{9,10})', query)
-        if bare_id_match:
-            # Verify the query is short/simple enough that this is likely a Confluence ID
-            # (not a complex sentence that happens to contain a large number)
-            stripped = query.strip()
-            # If the query is mostly the number + some short text, treat as Confluence
-            non_digit_text = re.sub(r'\d+', '', stripped).strip()
-            if len(non_digit_text) <= 30:  # Short surrounding text → likely a page ID query
-                confluence_match = bare_id_match
-    
-    if confluence_match:
-        page_id = confluence_match.group(1)
-        _emit(state, "🧭", f"Rule routing: detected Confluence page ID {page_id}, routing to search.")
-        return {
-            "route_decision": "search",
-            "resolved_query": query,
-            "active_entities": [page_id]
-        }
+    # ------------------------------------------------------------------
+    # 2. If there's no conversation history, try vector search first.
+    #    If the top result is high-confidence we avoid any LLM call at all.
+    # ------------------------------------------------------------------
+    if not history:
+        from ..config import settings as _cfg
+        from ..tools.vector_tool import VectorTool
+        _grade_threshold = (
+            _cfg.grade_auto_approve_threshold
+            if _cfg and _cfg.grade_auto_approve_threshold is not None
+            else 0.65
+        )
+        try:
+            _vt = VectorTool()
+            _hits = _vt.search(query, n_results=5)
+            if _hits and _hits[0].get("score", 0) >= _grade_threshold:
+                _emit(state, "🚀", f"Fast-path: direct vector hit (score {_hits[0]['score']:.2f} >= {_grade_threshold})")
+                log_audit("agent_unified_router_fast_vector", {"score": _hits[0]['score']})
+                return {
+                    "route_decision": "search",
+                    "resolved_query": query,
+                    "active_entities": [],
+                    "pending_tool_calls": [{"name": "vector_search", "args": {"query": query}}],
+                    "llm_call_count": state.get("llm_call_count", 0),
+                    "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
+                    "llm_completion_tokens": state.get("llm_completion_tokens", 0),
+                    "llm_total_tokens": state.get("llm_total_tokens", 0),
+                }
+        except Exception as _e:
+            log_audit("agent_unified_router_fast_vector_error", {"error": str(_e)})
 
-    _emit(state, "🧠", "Analyzing conversation context and routing...")
-    log_audit("agent_analyze_start", {"query": query})
+    # ------------------------------------------------------------------
+    # 3. Fall back to single LLM call for everything else
+    # ------------------------------------------------------------------
+    _emit(state, "🧠", "Routing & decomposing query...")
 
     llm = _build_llm()
-    messages = [SystemMessage(content=ANALYZE_AND_ROUTE_SYSTEM)]
+    messages: list = [SystemMessage(content=UNIFIED_ROUTER_SYSTEM)]
     messages.extend(_history_to_messages(history))
-    messages.append(HumanMessage(content=query))
-    
+    # Avoid consecutive HumanMessages (HTTP 400 on some providers)
+    if messages and isinstance(messages[-1], HumanMessage):
+        if query not in str(messages[-1].content):
+            messages[-1].content = str(messages[-1].content) + f"\n\n{query}"
+    else:
+        messages.append(HumanMessage(content=query))
+
     response = _invoke_and_track(llm, messages, state)
     raw = _strip_think_tags(response.content.strip())
-    
+    log_audit("agent_unified_router_llm_raw", {"raw": raw[:300]})
+
     parsed = _extract_json(raw)
-    
+
     route_decision = "search"
     resolved_query = query
-    active_entities = []
-    
+    active_entities: list[str] = []
+    pending_tool_calls: list[dict[str, Any]] = []
+
     if isinstance(parsed, dict):
         route_decision = parsed.get("route_decision", "search")
-        resolved_query = parsed.get("resolved_query", query)
-        active_entities = parsed.get("active_entities", [])
-        
-    _emit(state, "🔀", f"Routing decision: {route_decision}")
-    log_audit("agent_analyze_result", {
+        resolved_query = parsed.get("resolved_query", query) or query
+        active_entities = parsed.get("active_entities") or []
+
+        # Prefer explicit tool_calls over sub_queries
+        tool_calls_raw = parsed.get("tool_calls") or []
+        sub_queries = parsed.get("sub_queries") or []
+
+        if tool_calls_raw:
+            for tc in tool_calls_raw:
+                if isinstance(tc, dict) and "name" in tc:
+                    pending_tool_calls.append({"name": tc["name"], "args": tc.get("args", {})})
+            _emit(state, "🧭", f"LLM routing: {', '.join(t['name'] for t in pending_tool_calls)}")
+        elif sub_queries and route_decision == "search":
+            pending_tool_calls = [
+                {"name": "vector_search", "args": {"query": sq}}
+                for sq in sub_queries[:3]
+            ]
+            _emit(state, "🔀", f"Decomposed into {len(pending_tool_calls)} sub-queries")
+
+    # Final fallback
+    if not pending_tool_calls and route_decision == "search":
+        pending_tool_calls = [{"name": "vector_search", "args": {"query": resolved_query}}]
+        _emit(state, "⚠️", "Router fallback: single vector_search")
+
+    _emit(state, "🔀", f"Route: {route_decision}")
+    log_audit("agent_unified_router_result", {
         "route_decision": route_decision,
         "resolved_query": resolved_query,
-        "active_entities": active_entities
+        "active_entities": active_entities,
+        "tools": [t["name"] for t in pending_tool_calls],
     })
 
     return {
         "route_decision": route_decision,
         "resolved_query": resolved_query,
         "active_entities": active_entities,
+        "pending_tool_calls": pending_tool_calls,
         "llm_call_count": state.get("llm_call_count", 0),
         "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
         "llm_completion_tokens": state.get("llm_completion_tokens", 0),

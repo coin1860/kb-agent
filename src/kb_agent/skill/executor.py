@@ -265,6 +265,9 @@ class SkillExecutor:
         Ask LLM to convert raw Python stdout/stderr into a natural-language answer.
         Falls back to the raw output on any LLM error.
         """
+        if len(raw_output) < 2000:
+            return raw_output
+            
         try:
             user_msg = (
                 f"User's question: {command}\n\n"
@@ -415,10 +418,11 @@ class SkillExecutor:
                 ended_at = _now_iso()
 
                 # ── Reflect ───────────────────────────────────────────────────
-                if step.tool in SAFE_READ_TOOLS and not is_error and len(result) > 50:
-                    verdict, reason = "continue", "Auto-approved fast-pass for safe read tool"
-                    self.renderer.print_info(f"[dim]⚡ Fast-pass reflection: skipped ({len(result)} chars)[/dim]")
-                    log_audit("skill_step_reflect_skipped", {"tool": step.tool, "reason": "fast_pass", "length": len(result)})
+                if not is_error:
+                    verdict, reason = "continue", "Auto-approved success result"
+                    if step.tool in SAFE_READ_TOOLS and len(result) > 50:
+                        self.renderer.print_info(f"[dim]⚡ Fast-pass reflection: skipped ({len(result)} chars)[/dim]")
+                        log_audit("skill_step_reflect_skipped", {"tool": step.tool, "reason": "fast_pass", "length": len(result)})
                 else:
                     verdict, reason = _reflect(step, result, self.llm)
                     self.renderer.print_reflect(verdict, reason)
