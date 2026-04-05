@@ -13,7 +13,6 @@ class Processor:
         os.makedirs(self.docs_path, exist_ok=True)
 
         # Dependencies
-        self.llm = LLMClient()
         self.vector_tool = VectorTool()
         
         from kb_agent.chunking import MarkdownAwareChunker
@@ -28,8 +27,6 @@ class Processor:
         if not doc_id:
             return # Skip invalid data
 
-        # 1. Save Full Markdown File
-        full_path = self.docs_path / f"{doc_id}.md"
         content = data.get("content", "")
         title = data.get("title", "")
         metadata = data.get("metadata", {})
@@ -41,42 +38,25 @@ class Processor:
         else:
             full_content = f"# {title}\n\n{content}"
 
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(full_content)
+        full_path_str = metadata.get("path")
+        if not full_path_str:
+            full_path_str = str(self.docs_path / f"{doc_id}.md")
 
-        # 2. Generate Summary
-        summary = self.llm.generate_summary(full_content)
-        summary_path = self.docs_path / f"{doc_id}-summary.md"
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(summary)
+        # 2. Skip Summary Generation
+        summary = ""
 
-        # 3. Index Both
-
-        # Index Summary
-        # Note: We apply **metadata first so that our specific keys override it if necessary
-        # But actually we want our keys to be authoritative.
-        # So we unpack metadata, then overwrite type/paths.
-        summary_meta = metadata.copy()
-        summary_meta.update({
-            "type": "summary",
-            "file_path": str(summary_path),
-            "related_file": str(full_path)
-        })
-
-        self.vector_tool.add_documents(
-            documents=[summary],
-            metadatas=[summary_meta],
-            ids=[f"{doc_id}-summary"]
-        )
-
-        # Index Chunks instead of truncated full content
+        # 3. Index Chunks
         base_meta = metadata.copy()
         base_meta.update({
             "type": "chunk",
-            "file_path": str(full_path),
+            "file_path": full_path_str,
             "doc_id": doc_id,
-            "related_file": str(full_path)
+            "related_file": full_path_str,
+            "document_title": title,
         })
+        
+        if summary:
+            base_meta["document_summary"] = summary
         
         chunks = self.chunker.chunk(full_content, base_meta)
         

@@ -37,9 +37,9 @@ APPROVAL_TOOLS = {"write_file", "run_python", "confluence_create_page", "conflue
 def _get_legacy_tools_description() -> str:
     from kb_agent.agent.tools import get_skill_tools
     tools = get_skill_tools()
-    lines = ["Available tools (with approval requirement):"]
+    lines = ["Available tools:"]
     for idx, t in enumerate(tools, 1):
-        lines.append(f"{idx}. {t.name} - {getattr(t, 'description', '')}")
+        lines.append(f"- {t.name}: {getattr(t, 'description', '')}")
     return "\n".join(lines)
 
 PLANNER_SYSTEM = """\
@@ -509,14 +509,6 @@ Rules:
 - If you need to execute Python code, you MUST FIRST use 'write_file' to save the script before using 'run_python' to execute it.
 - Ensure all required files exist (via write_file or previous tool outputs) before they are used as arguments in subsequent tool calls.
 
-**CRITICAL TOOL CALLING FORMAT**:
-- You MUST use the native tool calling mechanism.
-- Do NOT wrap your output in <function> or any other XML tags.
-- Output ONLY the tool call.
-- Use JSON-compatible types (e.g., true/false for booleans, not strings "true"/"false").
-
-**CRITICAL: You must output tool calls in PURE JSON format. NEVER use tags like <function> or markdown code blocks. The response must be a valid JSON object or list and nothing else.**
-
 OUTPUT: Return a tool call. If the task is fully achieved and you want to reply to the user directly, please invoke the `direct_response` tool.
 """
 
@@ -666,6 +658,23 @@ def decide_next_step(
             
         # 2. Text-based tool calls (fallback for llama3/etc. that bypass the validator)
         content = str(response.content or "")
+        
+        # Check for Llama 3's raw JSON tool output format containing {"type": "function", ...}
+        if '"type": "function"' in content and '"name":' in content:
+            try:
+                # Assuming content might be entirely parseable JSON
+                parsed_content = json.loads(content)
+                if isinstance(parsed_content, dict) and parsed_content.get("type") == "function":
+                    t_name = parsed_content.get("name")
+                    t_args = parsed_content.get("parameters", parsed_content.get("arguments", {}))
+                    if isinstance(t_args, str):
+                        t_args = _parse_args_safely(t_args)
+                    logger.info("Extracted JSON tool call from raw content: %s", t_name)
+                    return _format_tool_response({"name": t_name, "args": t_args, "id": f"json_{iteration}"}, content)
+            except Exception:
+                pass
+
+        # Check for XML style <function=...>
         tool_pattern = r"<function=(\w+)(.*?)>(</function>|$)"
         match = re.search(tool_pattern, content, re.DOTALL)
         if match:

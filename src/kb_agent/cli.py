@@ -57,6 +57,16 @@ def run_indexing():
 
         try:
             print(f"Processing {file_id}...")
+            
+            # Save the converted Markdown to the index directory
+            safe_filename = file_id if file_id.endswith(".md") else f"{file_id}.md"
+            index_file_path = settings.index_path / safe_filename
+            with open(index_file_path, "w", encoding="utf-8") as f:
+                f.write(doc.get("content", ""))
+                
+            # Point metadata to the generated index file so embeddings correctly trace back to it
+            doc.setdefault("metadata", {})["path"] = str(index_file_path)
+            
             processor.process(doc)
             count += 1
             

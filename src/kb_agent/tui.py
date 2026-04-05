@@ -257,7 +257,8 @@ class SettingsDetailScreen(ModalScreen[bool]):
     def _compose_rag(self):
         s = config.settings
         max_iter = str(s.max_iterations) if s and s.max_iterations is not None else "1"
-        threshold = str(s.vector_score_threshold) if s and s.vector_score_threshold is not None else "0.5"
+        threshold = str(s.vector_score_threshold) if s and s.vector_score_threshold is not None else "0.3"
+        grade_threshold = str(s.grade_auto_approve_threshold) if s and s.grade_auto_approve_threshold is not None else "0.65"
         chunk_max = str(s.chunk_max_chars) if s and s.chunk_max_chars is not None else "800"
         chunk_overlap = str(s.chunk_overlap_chars) if s and s.chunk_overlap_chars is not None else "200"
         use_reranker = str(s.use_reranker) if s and s.use_reranker is not None else "False"
@@ -266,7 +267,9 @@ class SettingsDetailScreen(ModalScreen[bool]):
         yield Label("Max Iterations", classes="settings-label", id="lbl-max-iter")
         yield Input(placeholder="1", value=max_iter, id="max_iterations", classes="settings-input")
         yield Label("Vector Score Threshold", classes="settings-label", id="lbl-vector-threshold")
-        yield Input(placeholder="0.5", value=threshold, id="vector_score_threshold", classes="settings-input")
+        yield Input(placeholder="0.3", value=threshold, id="vector_score_threshold", classes="settings-input")
+        yield Label("Grade Auto-Approve Threshold", classes="settings-label", id="lbl-grade-auto-approve-threshold")
+        yield Input(placeholder="0.65", value=grade_threshold, id="grade_auto_approve_threshold", classes="settings-input")
         yield Label("Chunk Max Chars", classes="settings-label", id="lbl-chunk-max")
         yield Input(placeholder="800", value=chunk_max, id="chunk_max_chars", classes="settings-input")
         yield Label("Chunk Overlap Chars", classes="settings-label", id="lbl-chunk-overlap")
@@ -344,7 +347,8 @@ class SettingsDetailScreen(ModalScreen[bool]):
 
         elif self.category == "rag":
             max_iter_raw = self.query_one("#max_iterations").value.strip() or "1"
-            threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.5"
+            threshold_raw = self.query_one("#vector_score_threshold").value.strip() or "0.3"
+            grade_threshold_raw = self.query_one("#grade_auto_approve_threshold").value.strip() or "0.65"
             chunk_max_raw = self.query_one("#chunk_max_chars").value.strip() or "800"
             chunk_overlap_raw = self.query_one("#chunk_overlap_chars").value.strip() or "200"
             use_reranker_raw = self.query_one("#use_reranker").value.strip().lower()
@@ -357,7 +361,11 @@ class SettingsDetailScreen(ModalScreen[bool]):
             try:
                 threshold = float(threshold_raw)
             except ValueError:
-                threshold = 0.5
+                threshold = 0.3
+            try:
+                grade_threshold = float(grade_threshold_raw)
+            except ValueError:
+                grade_threshold = 0.65
             try:
                 chunk_max = int(chunk_max_raw)
             except ValueError:
@@ -369,6 +377,7 @@ class SettingsDetailScreen(ModalScreen[bool]):
             updates = {
                 "max_iterations": max_iter,
                 "vector_score_threshold": threshold,
+                "grade_auto_approve_threshold": grade_threshold,
                 "chunk_max_chars": chunk_max,
                 "chunk_overlap_chars": chunk_overlap,
                 "use_reranker": use_reranker,

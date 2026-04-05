@@ -25,6 +25,9 @@ class ONNXEmbeddingFunction(embedding_functions.EmbeddingFunction):
             raise FileNotFoundError(f"Model ({model_path}) or Tokenizer ({tokenizer_path}) not found in {model_dir}")
         
         # Load the ONNX model
+        # NOTE: Using CPU provider to avoid OOM with llama.cpp sharing unified memory on Apple Silicon.
+        # CoreML provider causes memory spikes during first-run model compilation (.mlmodelc cache)
+        # which conflicts with llama.cpp's GPU memory footprint on 16GB M-series machines.
         sess_options = ort.SessionOptions()
         sess_options.intra_op_num_threads = 4
         self.session = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
