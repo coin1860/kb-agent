@@ -171,30 +171,125 @@ class SkillRenderer:
         }
         return mapping.get(raw_choice, "approve")
 
-    def print_intent_preview(self, summary: str, has_write_ops: bool) -> None:
-        """Display intent summary panel before execution."""
+    def print_intent_preview(self, summary: str, has_write_ops: bool, milestones: list | None = None) -> None:
+        """Display intent summary panel with inline milestone steps before execution."""
         icon = "⚠️" if has_write_ops else "📋"
-        write_note = "\n[dim yellow]⚠️  This task includes file write or script execution steps.[/dim yellow]" if has_write_ops else ""
+        lines: list[str] = [escape(summary)]
+        if milestones:
+            lines.append("")
+            for i, m in enumerate(milestones, 1):
+                lines.append(f"  [bold cyan]Step {i}[/bold cyan]  {escape(m.goal)}")
+        if has_write_ops:
+            lines.append("\n[dim yellow]⚠️  This task includes file write or script execution steps.[/dim yellow]")
         self.console.print(Panel(
-            f"{escape(summary)}{write_note}",
+            "\n".join(lines),
             title=f"[bold cyan]{icon} What I'll Do[/bold cyan]",
             border_style="cyan",
             padding=(0, 1),
         ))
 
-    def print_intent_approval(self, has_write_ops: bool) -> bool:
-        """Prompt user to approve the intent. Returns True if approved."""
+    def print_intent_approval(self, has_write_ops: bool) -> str:
+        """Prompt user to approve the intent.
+
+        Returns one of:
+          'approve_all'  — proceed, skip all per-step confirmations
+          'approve_step' — proceed, ask confirmation at each write/execute step
+          'cancel'       — abort execution
+        """
         if not has_write_ops:
             self.console.print("[dim]✓ Auto-approved (read-only task)[/dim]")
-            return True
+            return "approve_all"
         self.console.print()
+        self.console.print(
+            "[dim]([bold white]A[/bold white]pprove all steps  "
+            "· [bold white]S[/bold white]tep-by-step  "
+            "· [bold white]N[/bold white]o / cancel)[/dim]"
+        )
         raw = Prompt.ask(
-            "[bold cyan]Proceed?[/bold cyan] [dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
-            choices=["y", "n", "yes", "no"],
-            default="y",
+            "[bold cyan]Proceed?[/bold cyan]",
+            choices=["a", "s", "n", "approve", "step", "no"],
+            default="a",
             show_choices=False,
         ).lower()
-        return raw in ("y", "yes")
+        mapping = {
+            "a": "approve_all", "approve": "approve_all",
+            "s": "approve_step", "step": "approve_step",
+            "n": "cancel", "no": "cancel",
+        }
+        return mapping.get(raw, "approve_all")
+
+    def print_step_approval(self, tool_name: str, args: dict) -> str:
+        """Per-step approval prompt showing tool + key target info.
+
+        Returns 'proceed' | 'auto_run' | 'skip' | 'cancel'.
+
+        'auto_run' means: execute this step AND skip future confirmations
+        for run_shell / run_python for the rest of the session.
+        """
+        # Extract a meaningful target hint from args
+        target = (
+            args.get("path")
+            or args.get("script_path")
+            or args.get("page_title")
+            or ""
+        )
+        target_hint = f" [cyan]{escape(str(target))}[/cyan]" if target else ""
+
+        # Show command preview for run_shell
+        content_preview = ""
+        if tool_name == "run_shell" and "command" in args:
+            cmd = str(args["command"])[:100].replace("\n", " ")
+            if len(str(args["command"])) > 100:
+                cmd += "…"
+            content_preview = f"\n  [dim]$ {escape(cmd)}[/dim]"
+        # Show a short content preview for write_file
+        elif tool_name == "write_file" and "content" in args:
+            preview = str(args["content"])[:80].replace("\n", "↵")
+            if len(str(args["content"])) > 80:
+                preview += "…"
+            content_preview = f"  [dim italic]{escape(preview)}[/dim italic]"
+
+        self.console.print(
+            f"\n[bold yellow]⚠️  {escape(tool_name)}[/bold yellow]{target_hint}{content_preview}"
+        )
+
+        # run_shell and run_python offer the auto-run shortcut
+        is_exec_tool = tool_name in ("run_shell", "run_python")
+        if is_exec_tool:
+            self.console.print(
+                "[dim]([bold white]Y[/bold white]es  "
+                "· [bold white]R[/bold white]un all (auto-run rest of session)  "
+                "· [bold white]S[/bold white]kip  "
+                "· [bold white]N[/bold white]o / cancel)[/dim]"
+            )
+            raw = Prompt.ask(
+                "[bold cyan]Proceed?[/bold cyan]",
+                choices=["y", "r", "s", "n", "yes", "run", "skip", "no"],
+                default="y",
+                show_choices=False,
+            ).lower()
+            mapping = {
+                "y": "proceed", "yes": "proceed",
+                "r": "auto_run", "run": "auto_run",
+                "s": "skip", "skip": "skip",
+                "n": "cancel", "no": "cancel",
+            }
+        else:
+            self.console.print(
+                "[dim]([bold white]Y[/bold white]es / [bold white]S[/bold white]kip / [bold white]N[/bold white]o / cancel)[/dim]"
+            )
+            raw = Prompt.ask(
+                "[bold cyan]Proceed?[/bold cyan]",
+                choices=["y", "s", "n", "yes", "skip", "no"],
+                default="y",
+                show_choices=False,
+            ).lower()
+            mapping = {
+                "y": "proceed", "yes": "proceed",
+                "s": "skip", "skip": "skip",
+                "n": "cancel", "no": "cancel",
+            }
+        return mapping.get(raw, "proceed")
 
     def print_dynamic_step_header(self, iteration: int, max_iterations: int, reason: str = "") -> None:
         """Show iteration progress in the dynamic decision loop."""

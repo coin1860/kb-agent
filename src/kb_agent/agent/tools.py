@@ -535,10 +535,15 @@ def _get_run_python():
     return _rp
 
 
+def _get_run_shell():
+    from kb_agent.tools.atomic.shell_exec import run_shell as _rs
+    SKILL_TOOL_APPROVAL_REGISTRY[_rs.name] = True
+    return _rs
+
+
 def get_skill_tools():
-    """Return the full tool list for the skill agent (ALL_TOOLS + atomic write tools)."""
-    # rag_query is already in ALL_TOOLS; atomic write tools are added separately
-    return ALL_TOOLS + [_get_write_file(), _get_run_python()]
+    """Return the full tool list for the skill agent (ALL_TOOLS + atomic write + shell tools)."""
+    return ALL_TOOLS + [_get_write_file(), _get_run_python(), _get_run_shell()]
 
 
 def tool_requires_approval(tool) -> bool:

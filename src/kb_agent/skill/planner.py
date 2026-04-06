@@ -32,7 +32,7 @@ from .session import Session
 
 logger = logging.getLogger(__name__)
 
-APPROVAL_TOOLS = {"write_file", "run_python", "confluence_create_page", "confluence_update_page"}
+APPROVAL_TOOLS = {"write_file", "run_python", "run_shell", "confluence_create_page", "confluence_update_page"}
 
 def _get_legacy_tools_description() -> str:
     from kb_agent.agent.tools import get_skill_tools
@@ -112,10 +112,15 @@ class Milestone:
     goal            — human-readable objective (what to achieve)
     expected_output — observable completion signal (what constitutes "done")
     iteration_budget — max tool calls allowed for this milestone's sub-loop
+    requires_tools  — False for pure knowledge/explanation milestones that need
+                      no external tool calls (e.g. "explain SDLC"). True for
+                      any milestone that must write, fetch, run, or search.
+                      The B-Gate enforces at least one tool call when True.
     """
     goal: str
     expected_output: str
     iteration_budget: int = 3
+    requires_tools: bool = True  # default True (fail-safe)
 
 
 def _parse_plan(raw: str) -> list[PlanStep]:
@@ -290,8 +295,8 @@ Available skills:
 
 Task Types (Routes):
 - chitchat: Greetings, pleasantries, or simple questions answerable without tools.
-- skill: The command's intent matches one of the available skills.
-- free_agent: The command requires tools/actions but does not match any specific skill.
+- skill: The command's intent (or ANY part of a compound command) matches one of the available skills. **CRITICAL**: If the user mentions a file format (e.g. PDF), a platform, or asks to perform an action covered by a skill, you MUST route to 'skill' and provide the 'skill_id'. If multiple parts exist, always bias toward 'skill' so the playbook is loaded!
+- free_agent: The command requires tools/actions but does NOT match any specific skill.
 
 Intent Preview:
 Provide a brief summary of what you plan to do. 
@@ -301,14 +306,16 @@ Provide a brief summary of what you plan to do.
 
 Milestone Planning (only if route is 'skill' or 'free_agent'):
 Decompose the task into an ordered list of 1-5 coarse, verifiable milestones before any tools are called. Each milestone describes a GOAL and an EXPECTED OUTPUT.
-- Each milestone MUST capture a distinct phase of environmental interaction (fetching, querying, writing, executing).
-- If the user specifies a specific technical method (e.g., "use Python", "run a script", "search Jira"), the milestone GOAL MUST explicitly include that requirement (e.g. "Execute Python code to...") to prevent the executor from skipping it.
+- Do NOT separate writing code and executing code into different milestones. If a script needs to be written and run, the planner MUST combine them into a SINGLE milestone (e.g. "Write and execute a Python script to...").
+- If the user specifies a specific technical method (e.g., "use Python", "run a script", "search Jira"), the milestone GOAL MUST explicitly include that requirement.
+- **CRITICAL DEFAULT**: Even if the user does NOT specify a method, if the task involves generating ANY document format (e.g., PDF, PPTX, Excel, Word), the milestone GOAL MUST explicitly state "Write and execute a custom Python script to generate...". NEVER allow milestones to imply shell or CLI usage for document generation.
 - Do NOT list individual tool calls, but DO capture the major technical actions requested by the user.
 - 1-2 milestones for fetch + write workflows
 - Up to 5 for complex multi-phase tasks
 - iteration_budget: 1 for simple read-only lookups.
 - iteration_budget: 2-3 for simple write/execute tasks.
 - iteration_budget: 4-6 for complex analysis, multi-file edits, or tasks with potential retries.
+- requires_tools: false ONLY for milestones whose goal is to explain a concept, summarise prior results, or answer a question purely from LLM knowledge (NO file I/O, NO fetching, NO code execution needed). true for ALL other milestones (writing files, running code, searching, fetching data, etc.).
 
 OUTPUT: Return ONLY a JSON object with this exact schema:
 {{
@@ -320,7 +327,8 @@ OUTPUT: Return ONLY a JSON object with this exact schema:
     {{
       "goal": "<objective>",
       "expected_output": "<completion signal>",
-      "iteration_budget": <int, 1-6>
+      "iteration_budget": <int, 1-6>,
+      "requires_tools": <true|false>
     }}
   ]
 }}
@@ -458,6 +466,7 @@ def generate_unified_plan(
                     goal=ms.get("goal", ""),
                     expected_output=ms.get("expected_output", ""),
                     iteration_budget=int(ms.get("iteration_budget", default_budget)),
+                    requires_tools=bool(ms.get("requires_tools", True)),
                 ))
         
         if not milestones and route != "chitchat":
@@ -503,10 +512,13 @@ Rules:
 - If a skill playbook is provided, you MUST execute its steps in order without skipping
 - Do NOT call the same tool with identical args twice (check history)
 - If iteration >= max_iterations, you MUST use the direct_response or final answer tool immediately (even partial)
-- Use the run_id '{run_id}' in 'python_code/' paths (e.g. 'python_code/{run_id}/step_1.py')
+- MUST use the run_id '{run_id}' in 'python_code/' paths for your generated executable Python scripts (e.g. 'python_code/{run_id}/generate.py'). NEVER use 'temp/' for python scripts.
 - For file outputs, use 'output/' prefix (e.g. 'output/report.md')
 - For temporary intermediate files, use 'temp/' prefix (e.g. 'temp/data.json')
-- If you need to execute Python code, you MUST FIRST use 'write_file' to save the script before using 'run_python' to execute it.
+- If you need to execute Python code, you MUST FIRST use 'write_file' (saving to 'python_code/') before using 'run_python' to execute it.
+- NEVER invent or guess CLI commands for run_shell. **Do NOT use run_shell for document generation (PDF, PPT, Word, etc.).** If you are operating a skill, it is a concept, not an executable binary file.
+- If the goal involves creating documents, reports, or charts, you MUST ALWAYS use `write_file` to create a custom Python script and then employ `run_python` to execute it.
+- DO NOT use 'vector_search' or 'read_file' to search for the skill playbook/guide. The complete skill playbook is already provided to you directly in the prompt below.
 - Ensure all required files exist (via write_file or previous tool outputs) before they are used as arguments in subsequent tool calls.
 
 OUTPUT: Return a tool call. If the task is fully achieved and you want to reply to the user directly, please invoke the `direct_response` tool.
@@ -535,20 +547,21 @@ def _truncate_messages(messages: list[BaseMessage], max_messages: int = 20) -> l
     """Keep system prompt and the N latest messages, ensuring AIMessage-ToolMessage pairs stay together."""
     if len(messages) <= max_messages:
         return messages
-    
-    # We always keep the first message (SystemMessage)
-    system_msg = messages[0]
-    others = messages[1:]
-    
-    # Take the last N-1 messages
-    truncated = others[-(max_messages-1):]
-    
+
+    # We always keep the first TWO messages (SystemMessage + Task Context HumanMessage)
+    core_msgs = messages[:2]
+    others = messages[2:]
+
+    # Take the last N-2 messages
+    truncated = others[-(max_messages - 2):]
+
     # If the first message in our truncation is a ToolMessage, it means we cut off its AIMessage.
     # To keep the history valid, we drop that orphaned ToolMessage.
     if truncated and isinstance(truncated[0], ToolMessage):
         truncated = truncated[1:]
-        
-    return [system_msg] + truncated
+
+    return core_msgs + truncated
+
 
 def _build_message_history(
     command: str,
@@ -559,56 +572,64 @@ def _build_message_history(
     session_run_id: str = "",
     iteration: int = 1,
     max_iterations: int = 3,
+    milestone_index: int = 1,
 ) -> list[BaseMessage]:
-    """Build LangChain message history from the task state for bind_tools."""
+    """Build LangChain message history from the task state for bind_tools.
+
+    Skill content injection strategy (prompt bloat optimization):
+    - milestone_index == 1: inject full skill raw_content (LLM gets the whole playbook once)
+    - milestone_index > 1:  inject compact header only (saves ~2k-8k tokens per subsequent call)
+    """
     sys_parts = [DECIDE_NEXT_STEP_SYSTEM.format(
         run_id=session_run_id,
         tools_section=_get_legacy_tools_description()
     )]
     system_msg = SystemMessage(content="\n".join(sys_parts))
-    
+
     user_parts = [f"User command: {command}"]
     if milestone_goal:
         user_parts.append(f"\n🎯 CURRENT MILESTONE GOAL (focus ONLY on this):\n{milestone_goal}")
     if prior_context:
         user_parts.append(f"\n📋 Prior milestone context:\n{prior_context}")
     if skill_def:
+        # Full content injection on ALL milestones
         expanded = expand_skill_content(skill_def)
-        user_parts.append(f"\n⚠️  SKILL PLAYBOOK HARD CONSTRAINT:\n'{skill_def.name}':\n{expanded}")
-    
+        user_parts.append(
+            f"\n⚠️  SKILL PLAYBOOK HARD CONSTRAINT:\n'"
+            f"{skill_def.name}':\n{expanded}"
+        )
+
     messages: list[BaseMessage] = [system_msg, HumanMessage(content="\n".join(user_parts))]
-    
+
     for entry in tool_history:
         tool_name = entry.get("tool", "")
         args = entry.get("args", {})
         result = str(entry.get("result", ""))
         status = entry.get("status", "")
         call_id = entry.get("tool_call_id", f"call_{entry.get('step', '0')}")
-        
+
         if status == "skipped":
             result = "[user skipped]"
-            
+
         ai_msg = AIMessage(
-            content="", 
+            content="",
             tool_calls=[{"name": tool_name, "args": args, "id": call_id}]
         )
         tool_msg = ToolMessage(content=result, name=tool_name, tool_call_id=call_id)
         messages.extend([ai_msg, tool_msg])
-        
+
     iter_prompt = f"\n\nIteration: {iteration} / {max_iterations}"
     if iteration >= max_iterations:
         iter_prompt += "\n🚨 MAX ITERATIONS REACHED. You MUST query `direct_response` to output the final answer now."
-    
-    # Instead of appending a new HumanMessage (which causes consecutive user messages and HTTP 400),
-    # we append the iteration info to the last HumanMessage in the list.
+
+    # Append iteration info to the last HumanMessage (avoids consecutive user messages → HTTP 400)
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], HumanMessage):
             messages[i].content = str(messages[i].content) + iter_prompt
             break
     else:
-        # Fallback if no HumanMessage found (shouldn't happen with our construction)
         messages.append(HumanMessage(content=iter_prompt))
-    
+
     return _truncate_messages(messages)
 
 def decide_next_step(
@@ -621,14 +642,15 @@ def decide_next_step(
     max_iterations: int = 3,
     milestone_goal: Optional[str] = None,
     prior_context: Optional[str] = None,
+    milestone_index: int = 1,
 ) -> dict[str, Any]:
     """
     Ask the LLM to decide the single next action natively using bind_tools().
     """
     from kb_agent.agent.tools import get_skill_tools
-    
+
     tool_history = tool_history or []
-    
+
     messages = _build_message_history(
         command=command,
         tool_history=tool_history,
@@ -638,6 +660,7 @@ def decide_next_step(
         session_run_id=session.run_id,
         iteration=iteration,
         max_iterations=max_iterations,
+        milestone_index=milestone_index,
     )
 
     log_audit("skill_decide_start", {

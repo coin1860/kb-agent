@@ -62,13 +62,24 @@ class Session:
     ended_at: Optional[str] = None
 
     def setup_dirs(self, output_base: Path, python_code_base: Path, temp_base: Optional[Path] = None) -> None:
-        """Create run-scoped directories under output, python_code, and temp bases."""
+        """Register run-scoped directory paths (lazy — dirs are NOT created yet).
+
+        Call ensure_run_dirs() before any file write to actually create them.
+        This prevents empty UUID directories from accumulating for read-only
+        or chitchat commands that never write any files.
+        """
         self.output_dir = output_base / self.run_id
         self.python_code_dir = python_code_base / self.run_id
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.python_code_dir.mkdir(parents=True, exist_ok=True)
         if temp_base is not None:
             self.temp_dir = temp_base / self.run_id
+
+    def ensure_run_dirs(self) -> None:
+        """Create run-scoped directories on demand (idempotent)."""
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.python_code_dir:
+            self.python_code_dir.mkdir(parents=True, exist_ok=True)
+        if self.temp_dir:
             self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _manifest_path(self) -> Optional[Path]:

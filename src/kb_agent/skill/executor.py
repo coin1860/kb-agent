@@ -60,19 +60,23 @@ A Python script failed to run. Given the script path, its content, and the error
 decide the best repair action:
 
 - "pip_install": a required package is missing (ModuleNotFoundError / ImportError)
-  → set "package" to the pip package name to install
-- "fix_code": the code itself has a bug that can be fixed
-  → set "fixed_code" to the complete corrected Python script (not a diff, the full file)
+  → Output JSON: {"action": "pip_install", "package": "name_of_package"}
+- "patch_code": target a specific block of buggy code and replace it (Surgical Patch)
+  → Output JSON: {"action": "patch_code", "search_block": "exact lines to find", "replace_block": "lines to replace them with"}
 - "give_up": the error is unrecoverable or unclear
+  → Output JSON: {"action": "give_up"}
 
-Rules:
-- If the error mentions "No module named 'X'", use pip_install with package "X" (use the real PyPI name if different from the import name)
-- For syntax/logic errors, fix_code with the complete corrected script
-- Never pip_install and fix_code in the same response — pick one
-- The fixed_code must be complete and runnable, not a partial patch
+CRITICAL RULES for patch_code:
+- `search_block` MUST be a *perfect* character-for-character substring of the original file, including all exact leading spaces/indentation!
+- Provide 2-3 lines of unchanged code above and below your fix within the `search_block` serving as ANCHORS to ensure uniqueness.
+- Only change the MINIMUM number of lines needed to fix the specific error.
+- DO NOT rewrite the entire file unless the whole file genuinely needs rewriting.
+- DO NOT output the `search_block` or `replace_block` in markdown fences outside the JSON. All patch data MUST be raw strings inside the JSON.
+- If the error is a missing directory, include `import os` if needed and add `os.makedirs()`.
 
-Respond ONLY with valid JSON:
-{"action": "pip_install"|"fix_code"|"give_up", "package": "...", "fixed_code": "..."}
+Other rules:
+- If the error mentions "No module named 'X'", use pip_install with package "X" (use the real PyPI name)
+- For syntax/logic errors, use patch_code.
 """
 
 PYTHON_SUMMARY_SYSTEM = """\
@@ -161,6 +165,7 @@ class SkillExecutor:
         script_path: str,
         error_output: str,
         tool_map: dict,
+        original_command: str = "",
     ) -> tuple[bool, str]:
         """
         Attempt to auto-fix a failed Python script.
@@ -170,25 +175,47 @@ class SkillExecutor:
           2. Apply the fix
           3. Re-run via run_python
 
+        Args:
+            script_path: Path to the failing script.
+            error_output: stderr / combined output from the failed run.
+            tool_map: Dict of available tools (needs write_file).
+            original_command: The user's original task description, used as a
+                context anchor so the LLM doesn't drift from the script's intent.
+
         Returns (fixed: bool, final_result: str).
         """
         from kb_agent.tools.atomic.code_exec import pip_install, run_python
 
-        # Read the current script content
+        # Read the original script content once and preserve it as an anchor.
+        # Subsequent attempts always show the LLM the original intent, even if
+        # a previous fix attempt already overwrote the file with wrong content.
         try:
-            script_content = Path(script_path).read_text(encoding="utf-8")
+            original_script_content = Path(script_path).read_text(encoding="utf-8")
         except Exception:
-            script_content = "(could not read script)"
+            original_script_content = "(could not read script)"
+
+        # current_content tracks the last written version for re-run context
+        current_content = original_script_content
 
         for attempt in range(1, _AUTO_FIX_MAX + 1):
             self.renderer.print_info(
                 f"🔧 Auto-fix attempt {attempt}/{_AUTO_FIX_MAX} for {script_path}..."
             )
 
-            # Ask LLM for repair action
+            # Ask LLM for repair action.
+            # Convert file content to line-numbered version if this is a retry due to a failed patch
+            if "PatchError" in error_output:
+                lines = current_content.splitlines()
+                numbered_content = "\n".join(f"{i+1:4d} | {line}" for i, line in enumerate(lines))
+                content_to_show = f"FILE CONTENT WITH LINE NUMBERS:\n{numbered_content}"
+            else:
+                content_to_show = f"Current script content:\n```python\n{current_content[:3000]}\n```"
+
+            task_ctx = f"Original user task: {original_command}\n\n" if original_command else ""
             user_msg = (
+                f"{task_ctx}"
                 f"Script path: {script_path}\n"
-                f"Script content:\n```python\n{script_content[:3000]}\n```\n\n"
+                f"{content_to_show}\n\n"
                 f"Error output:\n{error_output[:2000]}"
             )
             try:
@@ -197,10 +224,13 @@ class SkillExecutor:
                     HumanMessage(content=user_msg),
                 ])
                 raw = re.sub(r"<think>.*?</think>", "", response.content, flags=re.DOTALL).strip()
-                if "```" in raw:
-                    parts = raw.split("```")
-                    raw = parts[1].lstrip("json").strip() if len(parts) >= 3 else raw
-                fix = json.loads(raw)
+                
+                # Extract JSON block
+                json_match = re.search(r"\{.*?\}", raw, re.DOTALL)
+                if not json_match:
+                    raise ValueError("No JSON object found")
+                fix = json.loads(json_match.group(0))
+                        
             except Exception as e:
                 self.renderer.print_info(f"Auto-fix parse failed: {e}")
                 break
@@ -222,22 +252,35 @@ class SkillExecutor:
                     self.renderer.print_info("pip install failed, giving up.")
                     break
 
-            elif action == "fix_code":
-                fixed_code = fix.get("fixed_code", "")
-                if not fixed_code:
+            elif action == "patch_code":
+                search_block = fix.get("search_block", "")
+                replace_block = fix.get("replace_block", "")
+                if not search_block:
                     break
-                self.renderer.print_info("Auto-fix: rewriting script...")
+                
+                self.renderer.print_info("Auto-fix: applying surgical patch...")
+                if search_block not in current_content:
+                    # Fallback validation loop: target block not found!
+                    error_output = (
+                        "PatchError: The exact search_block was not found in the file. "
+                        "Make sure your indentation perfectly matches the file, and do not use line numbers in your search_block!\n"
+                        f"You searched for:\n{search_block}"
+                    )
+                    self.renderer.print_info(f"Patch validation failed. Forcing LLM retry.")
+                    continue
+
+                fixed_code = current_content.replace(search_block, replace_block)
+
                 write_fn = tool_map.get("write_file")
                 if write_fn is None:
                     break
-                # Use output/ path for the script since it was written there by write_file earlier
                 write_result = str(write_fn.invoke({
                     "path": script_path,
                     "content": fixed_code,
                     "mode": "overwrite",
                 }))
                 self.renderer.print_observe(write_result[:200])
-                script_content = fixed_code
+                current_content = fixed_code  # track latest written version
 
             else:
                 break
@@ -250,13 +293,11 @@ class SkillExecutor:
             if "exit_code: 0" in rerun_result:
                 return True, rerun_result
 
-            # Extract error output for next iteration
+            # Update error output for next iteration.
+            # NOTE: current_content is also updated above on fix_code, but we
+            # deliberately do NOT update original_script_content — it always
+            # reflects what the script was supposed to do.
             error_output = rerun_result
-            # Update script_content if it was changed
-            try:
-                script_content = Path(script_path).read_text(encoding="utf-8")
-            except Exception:
-                pass
 
         return False, error_output
 
@@ -407,7 +448,8 @@ class SkillExecutor:
                     script_path = resolved_args.get("script_path", "")
                     if script_path:
                         fixed, fixed_result = self._auto_fix_python(
-                            script_path, result, tool_map
+                            script_path, result, tool_map,
+                            original_command=session.command,
                         )
                         if fixed:
                             result = fixed_result

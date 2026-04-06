@@ -72,6 +72,10 @@ class SkillShell:
         self._tool_list = get_skill_tools()
         self._tool_map = {t.name: t for t in self._tool_list}
         self._session: Optional[Session] = None
+        # Set by _run_command() based on approval choice: if True, skip per-step confirmations
+        self._auto_approve_all: bool = False
+        # Set when user selects 'Run all' for run_shell/run_python — skips exec approval for rest of session
+        self._auto_approve_shell: bool = False
 
         # Read cli_max_iterations from settings (default 3)
         try:
@@ -94,11 +98,13 @@ class SkillShell:
 
     def start(self, data_folder: Path) -> None:
         """Start the REPL loop."""
-        # 0. Garbage collect old python_code and temp runs (> 24h)
-        if self.python_code_path.exists():
-            removed = Session.garbage_collect(self.python_code_path, days=1)
-            if removed > 0:
-                self.renderer.print_info(f"[dim]🧹 Cleaned up {removed} old run directories.[/dim]")
+        # 0. Garbage collect old run dirs in both python_code/ and output/ (> 24 h)
+        cleaned = 0
+        for gc_path in (self.python_code_path, self.output_path):
+            if gc_path and gc_path.exists():
+                cleaned += Session.garbage_collect(gc_path, days=1)
+        if cleaned > 0:
+            self.renderer.print_info(f"[dim]🧹 Cleaned up {cleaned} old run director{'y' if cleaned == 1 else 'ies'}.[/dim]")
 
         self.renderer.print_banner(len(self.skills), data_folder)
         if self.input_path:
@@ -280,7 +286,7 @@ class SkillShell:
         # Store resolved command so executor references the real path in LLM summary
         self._session.command = resolved
 
-        # 1. Routing, Intent Preview, and Milestone Planning
+        # 1. Routing, Intent Preview, and Milestone Planning (single LLM call)
         self.renderer.print_info("🔍 Analyzing intent and planning...")
         from .planner import generate_unified_plan
         unified_plan = generate_unified_plan(
@@ -297,11 +303,10 @@ class SkillShell:
         has_write_ops = unified_plan.has_write_ops
         milestones = unified_plan.milestones
 
-        # ── Chitchat shortcut ───────────────
+        # ── Chitchat shortcut — no dirs created, no approval needed ────────
         if route_type == "chitchat":
             self.renderer.print_info("[dim]💬 Direct response[/dim]")
-            answer = summary
-            self.renderer.print_result(answer, title="Reply")
+            self.renderer.print_result(summary, title="Reply")
             log_audit("chitchat_response", {"command": resolved[:200]})
             return
 
@@ -312,23 +317,28 @@ class SkillShell:
             self.renderer.print_info(f"🧩 Matched skill: [cyan]{skill_id}[/cyan]")
             self._session.skill_name = skill_id
 
-        # 2. Print intent preview
-        self.renderer.print_intent_preview(summary, has_write_ops)
+        # 2. Print intent preview with milestones embedded (no extra LLM call)
+        self.renderer.print_intent_preview(summary, has_write_ops, milestones)
 
-        # 3. Intent approval (auto-approve if read-only)
-        approved = self.renderer.print_intent_approval(has_write_ops)
-        if not approved:
+        # 3. Intent approval — returns mode string, not bool
+        approval_mode = self.renderer.print_intent_approval(has_write_ops)
+        if approval_mode == "cancel":
             self.renderer.print_info("Cancelled.")
             return
 
-        # 4. Dynamic execution loop
+        # Store approval mode so per-step prompts know whether to ask
+        self._auto_approve_all = (approval_mode == "approve_all")
+
+        # 4. Lazy-create run dirs only now that we know execution will happen
+        self._session.ensure_run_dirs()
+        self._session.write_manifest()
+
         cancel_token = CancellationToken()
         log_audit("dynamic_execute_start", {
             "command": resolved[:200],
             "route": route_type,
             "skill": skill_def.name if skill_def else None,
         })
-        self._session.write_manifest()
 
         try:
             with InterruptHandler(cancel_token):
@@ -400,17 +410,10 @@ class SkillShell:
             self.renderer.print_act(tool_name, args)
 
             # Per-step approval for write ops
-            if tool_name in APPROVAL_TOOLS:
-                from rich.prompt import Prompt
-                raw = Prompt.ask(
-                    f"[bold yellow]⚠️  {tool_name} requires approval. Proceed?[/bold yellow] "
-                    "[dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
-                    choices=["y", "n"],
-                    default="y",
-                    show_choices=False,
-                ).lower()
-                if raw != "y":
-                    self.renderer.print_info(f"Skipped {tool_name}.")
+            if tool_name in APPROVAL_TOOLS and not self._auto_approve_all:
+                step_decision = self.renderer.print_step_approval(tool_name, args)
+                if step_decision != "proceed":
+                    self.renderer.print_info(f"[dim]⏭ Skipped {tool_name}.[/dim]")
                     tool_history.append({
                         "step": iteration, "tool": tool_name, "args": args,
                         "result": "[user skipped]", "status": "skipped",
@@ -461,52 +464,122 @@ class SkillShell:
     # Two-layer milestone execution  (primary path)
     # ──────────────────────────────────────────────────────────────────────
 
-    _COMPRESS_SYSTEM = """\
-You are a milestone summariser for an AI agent. Given a milestone goal and the raw
-tool outputs produced during that milestone, write a comprehensive summary (up to 4,000 tokens)
-that:
-- States what was done and what was found
-- Preserves ALL structured artefacts exactly: file paths, ticket IDs, numbers, URLs, and data snippets
-- Retains as much useful detail as possible from the raw output, condensing only the fluff
+    _STATE_UPDATE_SYSTEM = """\
+You are a global state manager for an AI agent executing a long-running multi-step task.
+You will be provided with:
+1. The CURRENT Global State (Markdown)
+2. The GOAL of the latest completed milestone
+3. The RAW OUTPUT from executing that milestone
 
-This summary will be passed as context to subsequent milestones.
+Your task is to merge the new findings into the existing state and output a SINGLE, updated Markdown document.
+Rules:
+- Be concise. Output ONLY the updated Markdown content.
+- Preserve all persistent facts: API keys, file paths, database URLs, discovered structures, and unresolved blockers.
+- Discard obsolete execution logs or transient errors.
+- If the Current State is empty, simply initialize the Markdown document using the new findings.
+- Ensure the state reads logically as a "Single Source of Truth" for the next task.
 """
 
-    def _compress_milestone_result(
+    _VALIDATE_SYSTEM = """\
+You are a milestone completion evaluator for an AI agent.
+
+Given:
+- A milestone GOAL
+- The EXPECTED OUTPUT (what "done" looks like)
+- The ACTUAL RESULT produced
+
+Decide if the milestone was genuinely completed.
+
+Respond ONLY with valid JSON: {"passed": true|false, "gap": "<what is missing, or empty string if passed>"}
+
+Rules:
+- passed=false if the result consists primarily of questions to the user
+- passed=false if no actual work was done (file not written, code not run, data not fetched) when work was required
+- passed=false if the result is clearly incomplete or just a plan/outline
+- passed=true if the expected output was substantively addressed, even if imperfect
+"""
+
+    def _validate_milestone_completion(
         self,
+        milestone: Milestone,
+        raw_result: str,
+    ) -> tuple[bool, str]:
+        """
+        Lightweight LLM call to validate whether a milestone result satisfies
+        its expected_output.
+
+        Returns (passed: bool, gap: str).  Fails open (True) on LLM error so a
+        transient API issue never blocks the pipeline.
+        """
+        import json as _json
+        import re as _re
+        try:
+            user_msg = (
+                f"Milestone goal: {milestone.goal}\n"
+                f"Expected output: {milestone.expected_output}\n\n"
+                f"Actual result (first 3000 chars):\n{raw_result[:3000]}"
+            )
+            resp = self.llm.invoke([
+                SystemMessage(content=self._VALIDATE_SYSTEM),
+                HumanMessage(content=user_msg),
+            ])
+            raw = _re.sub(r"<think>.*?</think>", "", resp.content, flags=_re.DOTALL).strip()
+            # Strip code fences if present
+            if "```" in raw:
+                parts = raw.split("```")
+                raw = parts[1].lstrip("json").strip() if len(parts) >= 3 else raw
+            parsed = _json.loads(raw)
+            return bool(parsed.get("passed", True)), str(parsed.get("gap", ""))
+        except Exception as e:
+            logger.warning("_validate_milestone_completion failed: %s", e)
+            return True, ""  # fail open — don't block on LLM error
+
+    def _update_session_state(
+        self,
+        prior_state: str,
         milestone: Milestone,
         raw_result: str,
         llm,
     ) -> str:
         """
-        Compress a milestone's raw output into a ≤200-token paragraph summary.
+        Merge new milestone output into the global Markdown state document.
 
-        Falls back to raw_result[:1000] (truncated at last newline) on LLM error.
+        Falls back to preserving prior state + a truncated append on LLM error.
         """
         try:
-            # We pass a larger chunk of raw output since the model can handle it
             user_msg = (
-                f"Milestone goal: {milestone.goal}\n\n"
-                f"Raw output:\n{raw_result[:40000]}"
+                f"--- CURRENT GLOBAL STATE ---\n"
+                f"{prior_state if prior_state else '(Empty)'}\n\n"
+                f"--- LATEST MILESTONE: {milestone.goal} ---\n"
+                f"RAW OUTPUT:\n{raw_result[:40000]}"
             )
             resp = llm.invoke([
-                SystemMessage(content=self._COMPRESS_SYSTEM),
+                SystemMessage(content=self._STATE_UPDATE_SYSTEM),
                 HumanMessage(content=user_msg),
             ])
-            summary = resp.content.strip()
+            updated_state = resp.content.strip()
+            
+            # Ensure markdown block is cleanly extracted if enclosed in fences
+            import re
+            if "```" in updated_state:
+                parts = updated_state.split("```")
+                if len(parts) >= 3:
+                    fenced = parts[1]
+                    if fenced.startswith("markdown"):
+                        fenced = fenced[8:]
+                    updated_state = fenced.strip()
+
             usage = getattr(resp, "usage_metadata", None)
             if usage:
-                logger.debug(
-                    "Milestone compression: %d output tokens",
-                    usage.get("output_tokens", 0),
-                )
-            return summary if summary else raw_result[:1000]
+                logger.debug("State update: %d output tokens", usage.get("output_tokens", 0))
+                
+            return updated_state if updated_state else raw_result[:1000]
         except Exception as e:
-            logger.warning("_compress_milestone_result failed: %s", e)
-            # Truncate at last newline within first 1000 chars
+            logger.warning("_update_session_state failed: %s", e)
             chunk = raw_result[:1000]
             nl = chunk.rfind("\n")
-            return chunk[:nl] if nl > 0 else chunk
+            fallback_append = chunk[:nl] if nl > 0 else chunk
+            return f"{prior_state}\n\nFallback Update:\n{fallback_append}"
 
     def _execute_milestone(
         self,
@@ -528,17 +601,9 @@ This summary will be passed as context to subsequent milestones.
         """
         from .planner import PlanStep
 
-        # Initialise tool history from all previous session steps to provide cumulative context
-        tool_history: list[dict] = [
-            {
-                "step": srec.step_number,
-                "tool": srec.tool,
-                "args": srec.args,
-                "result": srec.result_summary,
-                "status": srec.status,
-            }
-            for srec in session.steps
-        ]
+        # [HCK] Fresh task scratchpad per milestone. 
+        # L1 Memory is completely wiped; L3 persistent state is passed via prior_context.
+        tool_history: list[dict] = []
         max_iter = milestone.iteration_budget
         milestone_result = ""
 
@@ -565,6 +630,7 @@ This summary will be passed as context to subsequent milestones.
                 max_iterations=max_iter,
                 milestone_goal=milestone.goal,
                 prior_context=prior_context or None,
+                milestone_index=milestone_index,
             )
 
             action_type = action.get("action", "final_answer")
@@ -572,6 +638,7 @@ This summary will be passed as context to subsequent milestones.
 
             # ── Milestone done ────────────────────────────────────────────
             if action_type == "final_answer":
+                # Legitimate completion using LLM judgment
                 milestone_result = action.get("answer", "")
                 break
 
@@ -581,27 +648,37 @@ This summary will be passed as context to subsequent milestones.
             finish_flag = action.get("finish_milestone", False)
             tool_call_id = action.get("tool_call_id", f"call_m{milestone_index}_i{iteration}")
 
+            # Normalize write/run paths to canonical session directories
+            args = self._normalize_tool_path(tool_name, args, session)
+
             self.renderer.print_dynamic_step_header(iteration, max_iter, reason)
 
             # Per-step approval for write ops
-            if tool_name in APPROVAL_TOOLS:
-                from rich.prompt import Prompt
-                raw_ans = Prompt.ask(
-                    f"[bold yellow]⚠️  {tool_name} requires approval. Proceed?[/bold yellow] "
-                    "[dim]([bold white]Y[/bold white]es / [bold white]N[/bold white]o)[/dim]",
-                    choices=["y", "n"],
-                    default="y",
-                    show_choices=False,
-                ).lower()
-                if raw_ans != "y":
-                    self.renderer.print_info(f"Skipped {tool_name}.")
+            _EXEC_TOOLS = {"run_shell", "run_python"}
+            skip_approval = (
+                self._auto_approve_all
+                or (self._auto_approve_shell and tool_name in _EXEC_TOOLS)
+            )
+            if tool_name in APPROVAL_TOOLS and not skip_approval:
+                step_decision = self.renderer.print_step_approval(tool_name, args)
+                if step_decision == "auto_run":
+                    # Execute this step AND enable auto-run for exec tools going forward
+                    self._auto_approve_shell = True
+                    self.renderer.print_info(
+                        "[dim]⚡ Auto-run enabled — shell and Python steps will run without confirmation.[/dim]"
+                    )
+                    # fall through to execute
+                elif step_decision == "skip":
+                    self.renderer.print_info(f"[dim]⏭ Skipped {tool_name}.[/dim]")
                     tool_history.append({
                         "step": iteration, "tool": tool_name, "args": args,
                         "result": "[user skipped]", "status": "skipped",
                         "tool_call_id": tool_call_id,
                     })
-                    # Skipped steps do NOT advance iteration count
                     continue
+                elif step_decision == "cancel":
+                    self.renderer.print_info("Execution cancelled.")
+                    return ""  # Return empty; caller handles gracefully
 
             # Build a transient PlanStep so SkillExecutor._execute_step() can
             # apply Reflect + retry + Python auto-fix.
@@ -663,16 +740,8 @@ This summary will be passed as context to subsequent milestones.
             "skill": skill_def.name if skill_def else None,
         })
 
-        # ── Step 1: Milestones received ─────────────────────────────
-
-
-        self.renderer.print_info(
-            f"[dim]📋 Plan: {len(milestones)} milestone(s)[/dim]"
-        )
-        for i, m in enumerate(milestones, 1):
-            self.renderer.print_info(f"[dim]  {i}. {m.goal}[/dim]")
-
-        # ── Step 2: Execute each milestone ────────────────────────────────
+        # ── Execute each milestone ────────────────────────────────────────
+        # (Milestone list is already shown in the What I'll Do preview panel)
         prior_context = ""
         final_results: list[str] = []
 
@@ -692,18 +761,41 @@ This summary will be passed as context to subsequent milestones.
             )
             final_results.append(raw_result)
 
-            # ── Compress and forward context to next milestone ─────────────
+            # ── Update Global State and forward to next milestone ─────────────
             if i < len(milestones):
-                if len(raw_result) < 8000:
-                    compressed = raw_result
-                    self.renderer.print_info(f"[dim]⚡ Fast-pass context: bypassed compression ({len(raw_result)} chars)[/dim]")
-                    logger.debug("Milestone %d result under 8k chars, skipping compression", i)
+                self.renderer.print_info(f"[dim]📝 Updating global session state with Milestone {i} findings...[/dim]")
+                updated_state = self._update_session_state(prior_context, milestone, raw_result, self.llm)
+                self.renderer.print_info(f"[dim]✅ State updated ({len(updated_state)} chars)[/dim]")
+                logger.debug("Global state updated after Milestone %d", i)
+
+                # A Gate: validate milestone completion against expected_output
+                passed, gap = self._validate_milestone_completion(milestone, raw_result)
+                log_audit("a_gate_result", {
+                    "milestone": i,
+                    "passed": passed,
+                    "gap": gap[:200] if gap else "",
+                })
+
+                if passed:
+                    status_color = "green"
+                    status_icon = "✅"
                 else:
-                    compressed = self._compress_milestone_result(milestone, raw_result, self.llm)
-                    logger.debug("Milestone %d compressed to %d chars", i, len(compressed))
-                
-                label = f"[Milestone {i}: {milestone.goal}]\n{compressed}"
-                prior_context = (prior_context + "\n\n" + label).strip() if prior_context else label
+                    status_color = "yellow"
+                    status_icon = "⚠️"
+                    gap_note = f"\n[WARNING: A-Gate Validation Failed — {gap}]" if gap else f"\n[WARNING: Validation Failed]"
+                    # Inject gap warning into state for LLM awareness if it failed
+                    updated_state = updated_state + gap_note
+                    
+                    self.renderer.print_info(
+                        f"[dim yellow]⚠️  A-Gate: milestone {i} validation failed — {gap}[/dim yellow]"
+                    )
+
+                self.renderer.print_info(
+                    f"\n[bold {status_color}]{status_icon} Milestone {i} Conclusion Logged.[/bold {status_color}]\n"
+                )
+
+                # Make the updated state the prior context for the next milestone
+                prior_context = updated_state
 
             # ── Audit milestone completion ─────────────────────────────────
             log_audit("milestone_done", {
@@ -715,10 +807,63 @@ This summary will be passed as context to subsequent milestones.
         # Return the last milestone's result as the final answer
         return final_results[-1] if final_results else ""
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Path normalization
+    # ──────────────────────────────────────────────────────────────────────
+
+    _PYTHON_TOOLS = {"write_file", "run_python"}
+
+    def _normalize_tool_path(self, tool_name: str, args: dict, session) -> dict:
+        """Ensure write_file and run_python paths stay inside canonical session dirs.
+
+        The LLM is instructed to use python_code/<run_id>/xxx.py but sometimes
+        drifts to bare filenames or temp/ paths.  This method silently corrects
+        the path before the tool is invoked so both the write and the run always
+        refer to the same location.
+
+        Correction rules (only applied when the path looks wrong):
+          - write_file / run_python with a .py extension → python_code/<run_id>/
+          - write_file non-.py files          → output/ (flat, no uuid subdir)
+          - Paths already under python_code/ or output/ are left untouched.
+        """
+        if tool_name not in self._PYTHON_TOOLS:
+            return args
+
+        path_key = "path" if tool_name == "write_file" else "script_path"
+        raw_path = str(args.get(path_key, "")).strip()
+        if not raw_path:
+            return args
+
+        from pathlib import PurePosixPath
+        p = PurePosixPath(raw_path)
+        parts = p.parts  # e.g. ('python_code', '<uuid>', 'step_1.py')
+
+        filename = p.name or "script.py"
+        
+        # Rule 1: Python scripts ALWAYS go to python_code/<run_id>/
+        if filename.endswith(".py"):
+            canonical = f"python_code/{session.run_id}/{filename}"
+        else:
+            # Rule 2: Non-Python files already correctly rooted are left alone
+            if parts and parts[0] in ("python_code", "output", "temp"):
+                return args
+            # Rule 3: Malformed paths for non-Python files default to output/
+            canonical = f"output/{filename}"
+
+        if canonical != raw_path:
+            logger.debug(
+                "_normalize_tool_path: '%s' → '%s' (tool=%s)", raw_path, canonical, tool_name
+            )
+            args = dict(args)
+            args[path_key] = canonical
+
+        return args
+
     def _intent_approval(self, preview: dict) -> bool:
         """Show intent preview and prompt user for approval. Returns True if approved."""
         self.renderer.print_intent_preview(preview["summary"], preview.get("has_write_ops", False))
-        return self.renderer.print_intent_approval(preview.get("has_write_ops", False))
+        mode = self.renderer.print_intent_approval(preview.get("has_write_ops", False))
+        return mode != "cancel"
 
     def _approval_gate(self, plan: list) -> Optional[list]:
         """
