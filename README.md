@@ -271,13 +271,57 @@ kb-cli
 
 ![KB-Cli Screenshot](docs/image/cli.png)
 
-**Workflow:**
-1.  **Intent Matching**: Automatically matches your query to a skill (e.g., `weekly-jira-report`) or treats it as a general agent task.
-2.  **Planning**: Generates a numbered step-by-step plan.
-3.  **Approval Gate**:
-    -   **Read-only plans** (searching, reading) execute automatically.
-    -   **Side-effect plans** (`write_file`, `run_python`) prompt for explicit human approval `[a]pprove / [e]dit / [q]uit`.
-4.  **Execution**: Rich scrolling output with real-time status updates and interrupt support (`Ctrl+C`).
+**Architecture & Workflow:**
+
+The CLI agent features a **Dual-Path Smart Routing** engine to handle both structured automation tasks and free-form knowledge queries efficiently.
+
+```mermaid
+graph TD
+    Start(["💻 kb-cli User Input"]) --> RouteIntent
+
+    subgraph "CLI Routing Engine"
+        RouteIntent["🔀 route_intent()<br/>Intent Classification"]
+    end
+
+    subgraph "Skill Execution Path (Playbooks)"
+        Plan["📝 generate_unified_plan()<br/>Extract Milestones"]
+        Approve["✅ Approval Gate<br/>Human-in-the-loop"]
+        ExecMilestone["⚙️ _execute_milestone()<br/>Think-Act-Observe Loop"]
+        Validate["🔎 A-Gate<br/>Validate Completion"]
+        UpdateState["💾 Global State Update"]
+    end
+
+    subgraph "Free Agent Path (Unstructured)"
+        RAGGraph["🧠 RAG Graph (_run_rag_query)<br/>CRAG / Chitchat / QA"]
+    end
+
+    RouteIntent -->|"🧩 Matched Skill"| Plan
+    Plan --> Approve
+    Approve --> ExecMilestone
+    ExecMilestone --> Validate
+    Validate --> UpdateState
+    UpdateState -.->|"Next Milestone"| ExecMilestone
+    UpdateState -->|"Done"| EndSkill(["🎯 Skill Result"])
+
+    RouteIntent -->|"💬 No Match (free_agent)"| RAGGraph
+    RAGGraph --> EndFree(["💡 RAG Answer / Chitchat"])
+
+    style Start fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style EndSkill fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style EndFree fill:#e1bee7,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style RouteIntent fill:#fff9c4,stroke:#fbc02d,color:#000
+    style Plan fill:#e3f2fd,stroke:#1565c0,color:#000
+    style RAGGraph fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style ExecMilestone fill:#fff3e0,stroke:#ef6c00,color:#000
+```
+
+1.  **Smart Routing**: User input is analyzed by `route_intent()`. If it matches an installed YAML skill playbook (e.g., `weekly-jira-report`), it enters the **Skill Execution Path**. Otherwise, for general questions or greetings, it falls back to the **Free Agent Path** traversing the adaptive RAG graph.
+2.  **Skill Pipeline (Two-Layer Execution)**:
+    -   **Planning**: Decomposes the skill into coarse milestones.
+    -   **Approval Gate**: Prompts for human approval (`[a]pprove / [e]dit / [q]uit`) before side-effects are performed.
+    -   **Execution**: Autonomously executes focused `Think → Act → Observe` sub-loops per milestone. 
+    -   **State Management**: Validates completion at the **A-Gate** and updates the markdown-based Global Session State for cross-milestone context preservation.
+3.  **Free Agent Pipeline**: Leverages the TUI's advanced LangGraph CRAG architecture (Analyze → Plan → Tool Exec → Grade → Synthesize) directly in the CLI, maintaining session history for multi-turn conversational capabilities.
 
 **Key Primitive Tools:**
 
