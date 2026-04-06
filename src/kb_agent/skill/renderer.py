@@ -2,20 +2,23 @@
 Rich-based CLI renderer for the skill agent.
 
 Provides Think/Act/Observe/Reflect logging, plan tables,
-progress bars, result panels, and interrupt menus.
+progress bars, result panels, interrupt menus, and streaming output.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.prompt import Prompt
+from rich.spinner import Spinner
 from rich.table import Table
 from rich import box
 
@@ -113,6 +116,121 @@ class SkillRenderer:
             console=self.console,
             transient=False,
         )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Spinner helpers (for blocking LLM calls)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def spinner(self, label: str) -> Live:
+        """Return a Rich Live spinner context manager for a blocking LLM call.
+
+        Usage::
+            with self.renderer.spinner("🔍 Planning..."):
+                result = llm.invoke(messages)
+        """
+        _spinner = Spinner("dots", text=f"[dim]{label}[/dim]", style="cyan")
+        return Live(_spinner, console=self.console, refresh_per_second=12, transient=True)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Streaming final answer
+    # ──────────────────────────────────────────────────────────────────────
+
+    def stream_tokens(self, token_gen: Iterator[str]) -> str:
+        """Stream plain-text tokens from *token_gen* directly to the terminal.
+
+        Handles think-tag suppression with a live "💭 Reasoning..." indicator:
+        - text inside <think>…</think> is suppressed (spinner shown instead)
+        - text outside is printed immediately via sys.stdout (no Rich buffering)
+
+        Returns the full accumulated visible text (think blocks excluded).
+        """
+        _THINK_OPEN  = "<think>"
+        _THINK_CLOSE = "</think>"
+
+        IN_THINK    : bool             = False
+        think_buffer: list[str]        = []
+        visible_parts: list[str]       = []
+        pending     : str              = ""
+        think_live  : Optional[Live]   = None
+
+        # Print the streaming header once
+        self.console.print("\n[bold green]╭─ Answer ────────────────────────────────[/bold green]")
+
+        def _flush_visible(text: str) -> None:
+            if not text:
+                return
+            visible_parts.append(text)
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+        def _start_think() -> None:
+            nonlocal think_live, IN_THINK
+            IN_THINK = True
+            _sp = Spinner("dots", text="[dim italic]💭 Reasoning...[/dim italic]", style="yellow")
+            think_live = Live(_sp, console=self.console, refresh_per_second=10, transient=True)
+            think_live.start()
+
+        def _end_think() -> None:
+            nonlocal think_live, IN_THINK
+            IN_THINK = False
+            think_buffer.clear()
+            if think_live is not None:
+                think_live.stop()
+                think_live = None
+
+        try:
+            for chunk in token_gen:
+                if not chunk:
+                    continue
+                pending += chunk
+
+                # Walk the pending buffer, detecting tag boundaries
+                while pending:
+                    if not IN_THINK:
+                        idx = pending.find(_THINK_OPEN)
+                        if idx == -1:
+                            # Flush safe prefix; hold back potential partial tag
+                            safe_len = max(0, len(pending) - len(_THINK_OPEN) + 1)
+                            if safe_len > 0:
+                                _flush_visible(pending[:safe_len])
+                                pending = pending[safe_len:]
+                            break  # wait for more chunks
+                        else:
+                            if idx > 0:
+                                _flush_visible(pending[:idx])
+                            pending = pending[idx + len(_THINK_OPEN):]
+                            _start_think()
+                    else:
+                        idx = pending.find(_THINK_CLOSE)
+                        if idx == -1:
+                            think_buffer.append(pending)
+                            pending = ""
+                            break
+                        else:
+                            think_buffer.append(pending[:idx])
+                            pending = pending[idx + len(_THINK_CLOSE):]
+                            _end_think()
+
+            # Drain remaining pending after all chunks consumed
+            if pending and not IN_THINK:
+                _flush_visible(pending)
+
+            # Safety: close an unclosed <think> block
+            if IN_THINK:
+                _end_think()
+
+        finally:
+            if think_live is not None:
+                try:
+                    think_live.stop()
+                except Exception:
+                    pass
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        self.console.print("[bold green]╰─────────────────────────────────────────[/bold green]")
+
+        return "".join(visible_parts)
 
     # ──────────────────────────────────────────────────────────────────────
     # Results

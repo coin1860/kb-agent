@@ -833,3 +833,205 @@ def preview_intent(
 
     # Fallback: use command as summary
     return {"summary": command, "has_write_ops": False}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Streaming final-answer helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+from typing import Generator
+
+
+def _iter_stream_text(llm, messages: list) -> Generator[str, None, None]:
+    """Internal: stream LLM response chunks and yield text content strings.
+
+    Uses bind_tools so the model can still decide to call a tool instead of
+    producing free text.  If the model opens a tool call (indicated by the
+    presence of tool_call_chunks in the first chunk), we stop streaming and
+    signal the caller via StopIteration carrying the accumulated raw AIMessage.
+
+    Caller must check for GeneratorExit/StopIteration to detect the tool-call
+    path.  In that case, the consumed chunks are yielded as a single sentinel
+    string: "__TOOL_CALL__" followed by the serialised tool name and args.
+    """
+    from typing import Any as _Any
+    from langchain_core.messages import AIMessageChunk
+    from kb_agent.agent.tools import get_skill_tools
+
+    try:
+        tools = get_skill_tools()
+        llm_with_tools = llm.bind_tools(tools)
+    except Exception as e:
+        logger.warning("stream_final_answer bind_tools failed: %s", e)
+        yield f"[Error binding tools: {e}]"
+        return
+
+    accumulated_chunks: list[AIMessageChunk] = []
+    saw_tool_call = False
+
+    try:
+        for chunk in llm_with_tools.stream(messages):
+            accumulated_chunks.append(chunk)
+
+            # Detect if the model is making a tool call (tool_call_chunks present)
+            if not saw_tool_call and getattr(chunk, "tool_call_chunks", None):
+                saw_tool_call = True
+
+            if saw_tool_call:
+                # Don't yield text; collect silently until stream ends
+                continue
+
+            # Yield text delta
+            text = chunk.content if isinstance(chunk.content, str) else ""
+            if text:
+                yield text
+
+    except Exception as e:
+        logger.error("_iter_stream_text stream failed: %s", e)
+        yield f"\n[Stream error: {e}]"
+        return
+
+    # If we saw a tool call, reconstruct it from accumulated chunks and signal
+    if saw_tool_call:
+        try:
+            # Merge all chunks into a combined AIMessageChunk
+            combined = accumulated_chunks[0]
+            for c in accumulated_chunks[1:]:
+                combined = combined + c  # LangChain supports + for AIMessageChunk
+
+            tool_calls = getattr(combined, "tool_calls", [])
+            if tool_calls:
+                tc = tool_calls[0]
+                # Signal caller: emit the sentinel + serialised tool payload
+                import json as _json
+                payload = _json.dumps({
+                    "name": tc.get("name", "") if isinstance(tc, dict) else tc.name,
+                    "args": tc.get("args", {}) if isinstance(tc, dict) else tc.args,
+                    "id":   tc.get("id", "stream_tc") if isinstance(tc, dict) else tc.id,
+                })
+                yield f"__TOOL_CALL__{payload}"
+        except Exception as e:
+            logger.warning("Could not reconstruct tool call from stream: %s", e)
+            # Fall back: yield combined text content
+            combined_text = "".join(
+                c.content for c in accumulated_chunks
+                if isinstance(c.content, str)
+            )
+            yield combined_text
+
+
+def stream_final_answer(
+    command: str,
+    session,
+    llm,
+    skill_def: Optional[SkillDef] = None,
+    tool_history: Optional[list] = None,
+    iteration: int = 1,
+    max_iterations: int = 3,
+    milestone_goal: Optional[str] = None,
+    prior_context: Optional[str] = None,
+    milestone_index: int = 1,
+) -> tuple[Generator[str, None, None], dict | None, list[str]]:
+    """Build the decision messages and return a (token_generator, tool_action, payload_store) tuple.
+
+    Two outcomes:
+    - **Streaming text**: token_generator yields text chunks; tool_action is None.
+    - **Tool call detected**: token_generator is empty; tool_action is a dict
+      compatible with _format_tool_response() output (same schema as decide_next_step).
+
+    The third element `payload_store` can be checked after the generator is exhausted
+    to see if a tool call appeared late (after some initial text).
+
+    The caller should iterate token_generator into renderer.stream_tokens().
+    If tool_action is not None, the caller should handle it via the normal
+    (non-streaming) tool execution path.
+    """
+    tool_history = tool_history or []
+
+    messages = _build_message_history(
+        command=command,
+        tool_history=tool_history,
+        milestone_goal=milestone_goal,
+        prior_context=prior_context,
+        skill_def=skill_def,
+        session_run_id=session.run_id,
+        iteration=iteration,
+        max_iterations=max_iterations,
+        milestone_index=milestone_index,
+    )
+
+    log_audit("stream_final_answer_start", {
+        "command": command[:200],
+        "iteration": iteration,
+    })
+
+    _SENTINEL = "__TOOL_CALL__"
+
+    def _token_gen() -> Generator[str, None, None]:
+        for chunk in _iter_stream_text(llm, messages):
+            if chunk.startswith(_SENTINEL):
+                # Store the serialised tool payload on the generator's throw-value
+                # by raising GeneratorExit – but we can't easily communicate back.
+                # Instead, we stash it as a generator attribute via a closure cell.
+                _payload_store.append(chunk[len(_SENTINEL):])
+                return  # stop yielding text
+            yield chunk
+
+    _payload_store: list[str] = []    # closure: catches tool-call sentinel payloads
+
+    gen = _token_gen()
+
+    # Peek: consume the generator eagerly to find out if the FIRST chunk is a
+    # tool-call sentinel.  Because stream responses are lazy, we can't know
+    # without consuming at least one item.
+    #
+    # Strategy: wrap gen in a peekable that pre-fetches one item, then re-chain.
+    import itertools as _it
+
+    def _peekable(source):
+        """Wrap *source* so we can inspect the first item before yielding."""
+        first_batch: list[str] = []
+        for chunk in source:
+            first_batch.append(chunk)
+            if _payload_store:
+                # A tool call was detected before any text was emitted
+                break
+            # Yield the first real text chunk, then chain rest of source
+            def _chain():
+                yield from first_batch
+                yield from source
+            return _chain(), None
+
+        # If we exhausted source without a tool call, chain normally
+        def _chain_all():
+            yield from first_batch
+            yield from source
+
+        return _chain_all(), None
+
+    token_gen_final, _ = _peekable(gen)
+
+    # If _payload_store is populated, a tool call was found before any text
+    if _payload_store:
+        import json as _json
+        try:
+            payload = _json.loads(_payload_store[0])
+            tool_action = _format_tool_response(payload, "")
+            log_audit("stream_final_answer_tool_call", {"tool": payload.get("name", "")})
+            # Return an empty generator + the tool action
+            return (x for x in []), tool_action, _payload_store  # type: ignore[return-value]
+        except Exception as e:
+            logger.warning("stream_final_answer could not decode tool payload: %s", e)
+
+    return token_gen_final, None, _payload_store  # type: ignore[return-value]
+
+def extract_late_tool_action(payload_store: list[str], raw_content: str) -> dict | None:
+    if not payload_store:
+        return None
+    import json
+    try:
+        payload = json.loads(payload_store[0])
+        return _format_tool_response(payload, raw_content)
+    except Exception as e:
+        logger.warning(f"Could not decode late tool payload: {e}")
+        return None

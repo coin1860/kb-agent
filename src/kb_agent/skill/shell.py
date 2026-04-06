@@ -31,7 +31,7 @@ from kb_agent.audit import log_audit
 from .executor import SkillExecutor
 from .interruptor import CancellationToken, InterruptHandler
 from .loader import SkillDef
-from .planner import APPROVAL_TOOLS, Milestone, decide_next_step, generate_plan, replan
+from .planner import APPROVAL_TOOLS, Milestone, decide_next_step, generate_plan, replan, stream_final_answer
 from .renderer import SkillRenderer
 from .router import route_intent
 from .session import Session, StepRecord
@@ -287,15 +287,15 @@ class SkillShell:
         self._session.command = resolved
 
         # 1. Routing, Intent Preview, and Milestone Planning (single LLM call)
-        self.renderer.print_info("🔍 Analyzing intent and planning...")
         from .planner import generate_unified_plan
-        unified_plan = generate_unified_plan(
-            command=resolved,
-            session=self._session,
-            skills=self.skills,
-            llm=self.llm,
-            default_budget=self._cli_max_iterations
-        )
+        with self.renderer.spinner("🔍 Analyzing intent and planning..."):
+            unified_plan = generate_unified_plan(
+                command=resolved,
+                session=self._session,
+                skills=self.skills,
+                llm=self.llm,
+                default_budget=self._cli_max_iterations
+            )
 
         route_type = unified_plan.route
         skill_id = unified_plan.skill_id
@@ -620,27 +620,80 @@ Rules:
                 break
 
             # ── Decide next action (milestone-focused) ────────────────────
-            action = decide_next_step(
-                command=command,
-                session=session,
-                llm=self.llm,
-                skill_def=skill_def,
-                tool_history=tool_history,
-                iteration=iteration,
-                max_iterations=max_iter,
-                milestone_goal=milestone.goal,
-                prior_context=prior_context or None,
-                milestone_index=milestone_index,
+            #
+            # On the first iteration we try streaming: the model may either
+            # produce a direct text answer (stream it) or call a tool.
+            # On subsequent iterations we always use blocking decide_next_step
+            # so tool-call parsing stays on the battle-tested non-streaming path.
+            #
+            # We also stream on any iteration when the model has already done
+            # meaningful tool work (tool_history non-empty and iter is near max)
+            # so the final summarisation is streamed.
+            _try_stream = (iteration == 1 and not tool_history) or (
+                tool_history and iteration >= max_iter
             )
 
-            action_type = action.get("action", "final_answer")
-            reason = action.get("reason", "")
+            if _try_stream:
+                from .planner import extract_late_tool_action
+                with self.renderer.spinner(f"💭 Thinking (iter {iteration}/{max_iter})..."):
+                    token_gen, tool_action, payload_store = stream_final_answer(
+                        command=command,
+                        session=session,
+                        llm=self.llm,
+                        skill_def=skill_def,
+                        tool_history=tool_history,
+                        iteration=iteration,
+                        max_iterations=max_iter,
+                        milestone_goal=milestone.goal,
+                        prior_context=prior_context or None,
+                        milestone_index=milestone_index,
+                    )
 
-            # ── Milestone done ────────────────────────────────────────────
-            if action_type == "final_answer":
-                # Legitimate completion using LLM judgment
-                milestone_result = action.get("answer", "")
-                break
+                if tool_action is None:
+                    # Pure streaming text — render and collect
+                    milestone_result = self.renderer.stream_tokens(token_gen)
+                    late_action = extract_late_tool_action(payload_store, milestone_result)
+                    if late_action:
+                        action = late_action
+                        # The code below will fall through and handle `action` properly
+                    else:
+                        break
+                else:
+                    # Model chose a tool call immediately — fall through to normal execution
+                    action = tool_action
+                    action_type = action.get("action", "final_answer")
+                    reason = action.get("reason", "")
+                    if action_type == "final_answer":
+                        milestone_result = action.get("answer", "")
+                        break
+            else:
+                # Blocking path (iterations > 1 with existing tool history)
+                with self.renderer.spinner(f"💭 Thinking (iter {iteration}/{max_iter})..."):
+                    action = decide_next_step(
+                        command=command,
+                        session=session,
+                        llm=self.llm,
+                        skill_def=skill_def,
+                        tool_history=tool_history,
+                        iteration=iteration,
+                        max_iterations=max_iter,
+                        milestone_goal=milestone.goal,
+                        prior_context=prior_context or None,
+                        milestone_index=milestone_index,
+                    )
+
+                action_type = action.get("action", "final_answer")
+                reason = action.get("reason", "")
+
+                # ── Milestone done ────────────────────────────────────────────
+                if action_type == "final_answer":
+                    # Stream the collected final answer text
+                    answer_text = action.get("answer", "")
+                    if answer_text:
+                        milestone_result = self.renderer.stream_tokens(iter([answer_text]))
+                    else:
+                        milestone_result = ""
+                    break
 
             # ── Tool call ─────────────────────────────────────────────────
             tool_name = action.get("tool", "")
@@ -763,8 +816,8 @@ Rules:
 
             # ── Update Global State and forward to next milestone ─────────────
             if i < len(milestones):
-                self.renderer.print_info(f"[dim]📝 Updating global session state with Milestone {i} findings...[/dim]")
-                updated_state = self._update_session_state(prior_context, milestone, raw_result, self.llm)
+                with self.renderer.spinner(f"📝 Updating session state after Milestone {i}..."):
+                    updated_state = self._update_session_state(prior_context, milestone, raw_result, self.llm)
                 self.renderer.print_info(f"[dim]✅ State updated ({len(updated_state)} chars)[/dim]")
                 logger.debug("Global state updated after Milestone %d", i)
 
