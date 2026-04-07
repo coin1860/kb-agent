@@ -1250,6 +1250,50 @@ class KBAgentApp(App):
             self._run_confluence_sync_worker(result["page_id"], result["depth"])
 
     @work(thread=True, exclusive=True)
+    def _run_confluence_sync_worker(self, page_id: str, depth: int):
+        log = self.query_one("#chat-log", RichLog)
+
+        self.call_from_thread(self._refresh_status, "thinking", f"Syncing Confluence (Page {page_id}, Depth {depth})...")
+        self.call_from_thread(log.write, "")
+        self.call_from_thread(log.write, f"  [dim]{self._ts()}[/dim]  [bold blue]System[/bold blue]")
+        self.call_from_thread(log.write, f"  [dim]Starting Confluence sync for Root ID {page_id} up to depth {depth}...[/dim]")
+
+        from kb_agent.connectors.confluence import ConfluenceConnector
+        import re
+
+        try:
+            connector = ConfluenceConnector()
+
+            def progress_cb(count, title):
+                self.call_from_thread(log.write, f"  [dim]✓ [{count}] Fetched: {title}[/dim]")
+
+            pages = connector.crawl_tree(page_id, max_depth=depth, on_progress=progress_cb)
+
+            output_dir = Path(config.settings.data_folder) / "source" / "confluence" if config.settings and config.settings.data_folder else Path("source/confluence")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            saved_count = 0
+            for page in pages:
+                space = page["metadata"].get("space", "UNKNOWN")
+                p_id = page["id"]
+                title = page["title"]
+                safe_title = re.sub(r'[^\w\-]', '_', title)
+                filename = f"{space}_{p_id}_{safe_title}.md"
+
+                filepath = output_dir / filename
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(page["content"])
+                saved_count += 1
+
+            msg = f"✓ Sync complete! Saved {saved_count} pages to `source/confluence/`\n\nRun `/index` or `kb-agent index` to update the search index."
+            self.call_from_thread(log.write, Padding(Markdown(msg), (0, 0, 0, 2)))
+
+        except Exception as e:
+            self.call_from_thread(log.write, f"\n[red]✗ Sync failed: {e}[/red]")
+        finally:
+            self.call_from_thread(self._refresh_status, "idle")
+
+    @work(thread=True, exclusive=True)
     def _run_jira_command(self, jira_id: str, query: str):
         log = self.query_one("#chat-log", RichLog)
         
