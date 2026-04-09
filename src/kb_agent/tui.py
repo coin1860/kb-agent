@@ -1544,12 +1544,31 @@ class KBAgentApp(App):
         def on_status(emoji, msg):
             self.call_from_thread(log.write, f"  [dim]{emoji} {msg}[/dim]")
             self.call_from_thread(self._refresh_status, "thinking", msg)
+            
+        def on_stream(token):
+            # Token here is typically a full line buffered by _stream_and_track
+            self.call_from_thread(log.write, Padding(token.strip("\n"), (0, 0, 0, 2)))
 
         self.call_from_thread(self._refresh_status, "thinking")
         self.call_from_thread(log.write, "")
 
         try:
-            response_tuple = self.engine.answer_query(query, on_status=on_status, mode=self.chat_mode, history=self.chat_history)
+            self.call_from_thread(log.write, "")
+            self.call_from_thread(
+                log.write,
+                f"  [dim]{self._ts()}[/dim]  [bold blue]Agent[/bold blue]",
+            )
+            
+            # Record line count before stream starts so we can replace it later
+            stream_start_line = len(log.lines)
+            
+            response_tuple = self.engine.answer_query(
+                query, 
+                on_status=on_status, 
+                on_stream=on_stream,
+                mode=self.chat_mode, 
+                history=self.chat_history
+            )
             
             if isinstance(response_tuple, tuple) and len(response_tuple) == 2:
                 response, sources = response_tuple
@@ -1564,13 +1583,8 @@ class KBAgentApp(App):
             self.chat_history.append({"role": "user", "content": query})
             self.chat_history.append({"role": "assistant", "content": response})
 
-            self.call_from_thread(log.write, "")
-            self.call_from_thread(
-                log.write,
-                f"  [dim]{self._ts()}[/dim]  [bold blue]Agent[/bold blue]",
-            )
-            # Render the entire response as Markdown with indentation
-            self.call_from_thread(log.write, Padding(Markdown(response), (0, 0, 0, 2)))
+            # Replace the streamed lines with final Markdown
+            self.call_from_thread(self._replace_stream_with_markdown, log, stream_start_line, response)
             
             # Write sources as static text to the RichLog
             if sources:
@@ -1600,6 +1614,22 @@ class KBAgentApp(App):
         except Exception as e:
             self.call_from_thread(log.write, f"\n[red]✗ Error: {e}[/red]")
             self.call_from_thread(self._refresh_status, "error", str(e))
+
+    def _replace_stream_with_markdown(self, log, start_line: int, markdown_text: str):
+        """Replaces the streamed lines in a RichLog with a single Markdown renderable."""
+        try:
+            # Delete purely the streamed lines
+            del log.lines[start_line:]
+            # Clear text cache so sizes adjust
+            log._line_cache.clear()
+            log._deferred_renders.clear()
+            # Rewrite as markdown
+            log.write(Padding(Markdown(markdown_text), (0, 0, 0, 2)))
+            # Force update layouts
+            log.refresh()
+        except Exception as e:
+            # Fallback if internal API changes
+            log.write(Padding(Markdown(markdown_text), (0, 0, 0, 2)))
 
     # ─── Actions ──────────────────────────────────────────────────────────
 

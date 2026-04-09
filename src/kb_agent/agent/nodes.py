@@ -157,6 +157,56 @@ def _invoke_and_track(llm: ChatOpenAI, messages: list, state: AgentState) -> AIM
 
     return response
 
+def _stream_and_track(llm: ChatOpenAI, messages: list, state: AgentState) -> AIMessage:
+    """Wrapper around `llm.stream` that tracks LLM usage and pushes tokens to callback."""
+    state["llm_call_count"] = state.get("llm_call_count", 0) + 1
+    
+    cb = state.get("stream_callback")
+    all_content = []
+    response_metadata = {}
+    usage_metadata = None
+    
+    buf = ""
+    for chunk in llm.stream(messages):
+        token = chunk.content or ""
+        all_content.append(token)
+        
+        # Buffer and push lines to callback
+        if cb and token:
+            buf += token
+            if "\n" in buf:
+                lines = buf.split("\n")
+                for line in lines[:-1]:
+                    cb(line + "\n")
+                buf = lines[-1]
+                
+        # Some models emit usage via the last chunk
+        if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+            usage_metadata = chunk.usage_metadata
+            
+    if cb and buf:
+        cb(buf)
+        
+    full_content = "".join(all_content)
+    
+    # We construct a mock AIMessage so the return type matches _invoke_and_track partially
+    response = AIMessage(content=full_content)
+    if usage_metadata:
+        response.usage_metadata = usage_metadata
+        
+    # Extract tokens safely
+    metadata = getattr(response, "usage_metadata", {}) or {}
+    
+    prompt_tokens = metadata.get("input_tokens", metadata.get("prompt_tokens", 0))
+    completion_tokens = metadata.get("output_tokens", metadata.get("completion_tokens", 0))
+    total_tokens = metadata.get("total_tokens", prompt_tokens + completion_tokens)
+
+    state["llm_prompt_tokens"] = state.get("llm_prompt_tokens", 0) + prompt_tokens
+    state["llm_completion_tokens"] = state.get("llm_completion_tokens", 0) + completion_tokens
+    state["llm_total_tokens"] = state.get("llm_total_tokens", 0) + total_tokens
+
+    return response
+
 
 def _extract_json(text: str) -> Any:
     """Best-effort extraction of JSON from LLM output.
@@ -1329,7 +1379,7 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
         messages.extend(_history_to_messages(history))
         messages.append(HumanMessage(content=state['query']))
         
-        response = _invoke_and_track(llm, messages, state)
+        response = _stream_and_track(llm, messages, state)
         raw_answer = _strip_think_tags(response.content)
         
         log_audit("synthesize_result", {
@@ -1410,7 +1460,7 @@ def synthesize_node(state: AgentState) -> dict[str, Any]:
         )
     )
 
-    response = _invoke_and_track(llm, messages, state)
+    response = _stream_and_track(llm, messages, state)
     raw_answer = _strip_think_tags(response.content)
 
     log_audit("synthesize_result", {

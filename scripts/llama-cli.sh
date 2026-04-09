@@ -1,8 +1,6 @@
 #!/bin/bash
 
 # --- 配置區 ---
-# MODEL_DIR="./qwen3.5-0.6b"
-# MODEL_PATH="${MODEL_DIR}/qwen3.5-0.6b.gguf"
 MODEL_DIR="models/gemma-4-2b"
 MODEL_PATH="${MODEL_DIR}/gemma-4-E2B-it-Q4_K_M.gguf"
 # MMPROJ_PATH="${MODEL_DIR}/mmproj-BF16.gguf"

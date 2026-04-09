@@ -57,6 +57,7 @@ class Engine:
         self,
         user_query: str,
         on_status=None,
+        on_stream=None,
         mode: str = "knowledge_base",
         history: List[Dict[str, str]] = None,
     ) -> tuple[str, list[dict[str, Any]]]:
@@ -96,7 +97,7 @@ class Engine:
             return Security.mask_sensitive_data(raw_response), []
 
         # 2. Knowledge Base mode — agentic RAG via LangGraph
-        return self._run_agentic_rag(user_query, _status, history)
+        return self._run_agentic_rag(user_query, _status, history, on_stream)
 
     # ------------------------------------------------------------------
     # Agentic RAG (LangGraph)
@@ -107,6 +108,7 @@ class Engine:
         user_query: str,
         _status,
         history: List[Dict[str, str]],
+        on_stream=None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """Invoke the LangGraph compiled workflow."""
         _status("🚀", "Starting agentic RAG workflow...")
@@ -123,6 +125,7 @@ class Engine:
             "is_sufficient": False,
             "final_answer": "",
             "status_callback": _status,
+            "stream_callback": on_stream,
         }
 
         try:

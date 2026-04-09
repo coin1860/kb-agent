@@ -95,6 +95,9 @@ class AgentState(TypedDict, total=False):
     status_callback: Any
     """Optional callback ``(emoji: str, msg: str) -> None`` for TUI progress."""
 
+    stream_callback: Any
+    """Optional callback ``(token: str) -> None`` for streaming response tokens to TUI."""
+
     # ── Tracking & Stats ──────────────────────────────────────────────────
     llm_call_count: int
     """Number of LLM API calls made during this run."""
