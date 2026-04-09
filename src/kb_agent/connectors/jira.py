@@ -68,7 +68,7 @@ class JiraConnector(BaseConnector):
         else:
             return self._search_jql(f'text ~ "{query}" ORDER BY updated DESC')
 
-    def _fetch_issue(self, issue_key: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    def _fetch_issue(self, issue_key: str, force_refresh: bool = False, inline_depth: int = 0) -> List[Dict[str, Any]]:
         """Fetch a single Jira issue by key."""
         jira_client = self.jira
         if not jira_client:
@@ -98,43 +98,81 @@ class JiraConnector(BaseConnector):
 
             formatted_issue = self._format_issue(issue_data, comments=comments)
             
-            # --- Inline Confluence Fetching ---
-            from kb_agent.connectors.confluence import ConfluenceConnector
-            confluence_connector = ConfluenceConnector()
-            if confluence_connector._is_configured:
-                # Extract page IDs
+            if inline_depth == 0:
                 import re
-                page_ids = set()
-                # 1. From description and comments
-                for m in re.finditer(r'pageId=(\d{9,10})', formatted_issue["content"]):
-                    page_ids.add(m.group(1))
-                for m in re.finditer(r'/pages/(\d{9,10})', formatted_issue["content"]):
-                    page_ids.add(m.group(1))
-                
-                # 2. From remote links
-                try:
-                    remote_links = jira_client.get_issue_remote_links(issue_key)
-                    for rl in remote_links:
-                        url = rl.get("object", {}).get("url", "")
-                        m1 = re.search(r'pageId=(\d{9,10})', url)
-                        m2 = re.search(r'/pages/(\d{9,10})', url)
-                        if m1: page_ids.add(m1.group(1))
-                        if m2: page_ids.add(m2.group(1))
-                except Exception as e:
-                    logger.warning(f"Failed to fetch remote links for {issue_key}: {e}")
+                description = issue_data.get("renderedFields", {}).get("description") or issue_data.get("fields", {}).get("description") or ""
 
-                if page_ids:
-                    formatted_issue["content"] += "\n\n## Inline Confluence Content"
-                    for pid in list(page_ids)[:3]:  # Limit to 3 Confluence pages to prevent context bloat
+                # --- Inline Jira Fetching ---
+                jira_keys = []
+                # 1. From issuelinks (Official priority)
+                for link in issue_data.get("fields", {}).get("issuelinks", []):
+                    key = None
+                    if "outwardIssue" in link:
+                        key = link["outwardIssue"].get("key")
+                    elif "inwardIssue" in link:
+                        key = link["inwardIssue"].get("key")
+                    if key and key not in jira_keys:
+                        jira_keys.append(key)
+                
+                # 2. From description (Backup)
+                for m in re.finditer(r'[A-Z][A-Z0-9]{1,9}-\d{3,6}', description):
+                    key = m.group(0)
+                    if key != issue_key and key not in jira_keys:
+                        jira_keys.append(key)
+
+                if jira_keys:
+                    formatted_issue["content"] += "\n\n## Inline Jira Content"
+                    for jk in jira_keys[:3]:
                         try:
-                            # Fetch page content directly using its ID
-                            page_results = confluence_connector.fetch_data(pid, force_refresh=force_refresh)
-                            if page_results and not page_results[0].get("metadata", {}).get("error"):
-                                pc = page_results[0].get("content", "")
-                                title = page_results[0].get("title", pid)
-                                formatted_issue["content"] += f"\n\n### Linked Confluence Page: {title}\n{pc}"
+                            jk_res = self._fetch_issue(jk, force_refresh=force_refresh, inline_depth=inline_depth + 1)
+                            if jk_res and not jk_res[0].get("metadata", {}).get("error"):
+                                pc = jk_res[0].get("content", "")
+                                title = jk_res[0].get("title", jk)
+                                formatted_issue["content"] += f"\n\n### Linked Jira: {jk} - {title}\n{pc}"
                         except Exception as e:
-                            logger.warning(f"Failed to fetch Confluence page {pid}: {e}")
+                            logger.warning(f"Failed to fetch Jira {jk}: {e}")
+
+                # --- Inline Confluence Fetching ---
+                from kb_agent.connectors.confluence import ConfluenceConnector
+                confluence_connector = ConfluenceConnector()
+                if confluence_connector._is_configured:
+                    page_ids = []
+                    
+                    # 1. From remote links (prioritized)
+                    try:
+                        remote_links = jira_client.get_issue_remote_links(issue_key)
+                        for rl in remote_links:
+                            url = rl.get("object", {}).get("url", "")
+                            m1 = re.search(r'pageId=(\d{9,10})', url)
+                            m2 = re.search(r'/pages/(\d{9,10})', url)
+                            pid = (m1 or m2).group(1) if (m1 or m2) else None
+                            if pid and pid not in page_ids:
+                                page_ids.append(pid)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch remote links for {issue_key}: {e}")
+
+                    # 2. From description mapping
+                    for m in re.finditer(r'pageId=(\d{9,10})', description):
+                        pid = m.group(1)
+                        if pid not in page_ids:
+                            page_ids.append(pid)
+                    for m in re.finditer(r'/pages/(\d{9,10})', description):
+                        pid = m.group(1)
+                        if pid not in page_ids:
+                            page_ids.append(pid)
+                    
+                    if page_ids:
+                        formatted_issue["content"] += "\n\n## Inline Confluence Content"
+                        for pid in page_ids[:3]:  # Limit to 3 Confluence pages to prevent context bloat
+                            try:
+                                # Fetch page content directly using its ID
+                                page_results = confluence_connector.fetch_data(pid, force_refresh=force_refresh)
+                                if page_results and not page_results[0].get("metadata", {}).get("error"):
+                                    pc = page_results[0].get("content", "")
+                                    title = page_results[0].get("title", pid)
+                                    formatted_issue["content"] += f"\n\n### Linked Confluence Page: {title}\n{pc}"
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch Confluence page {pid}: {e}")
             
             # Cache the main issue with all included context
             cache.write("jira", issue_key, formatted_issue)
@@ -349,7 +387,7 @@ JQL:"""
             r'https?://[^\s\)\]]+/wiki/[^\s\)\]]+|'
             r'https?://[^\s\)\]]+/display/[^\s\)\]]+|'
             r'https?://[^\s\)\]]+/pages/viewpage\.action\?pageId=\d{9,10}',
-            "\n".join(content_parts)
+            description
         )
         if confluence_links:
             content_parts.append("\n## Referenced Confluence Pages")
@@ -357,7 +395,25 @@ JQL:"""
             for link in confluence_links:
                 if link not in seen:
                     seen.add(link)
+            for link in list(seen)[:3]:
+                content_parts.append(f"- {link}")
+            if len(seen) > 3:
+                content_parts.append(f"- (and {len(seen) - 3} more links omitted)")
+
+        # --- Extract Jira links from description ---
+        jira_links = re.findall(r'[A-Z][A-Z0-9]{1,9}-\d{3,6}', description)
+        jira_links = [k for k in jira_links if k != issue_key]
+        if jira_links:
+            seen_j = set()
+            for link in jira_links:
+                if link not in seen_j:
+                    seen_j.add(link)
+            if seen_j:
+                content_parts.append("\n## Referenced Jira Issues")
+                for link in list(seen_j)[:3]:
                     content_parts.append(f"- {link}")
+                if len(seen_j) > 3:
+                    content_parts.append(f"- (and {len(seen_j) - 3} more issues omitted)")
         
         # --- Sub-tasks (NO keys exposed) ---
         subtasks = fields.get("subtasks", [])
