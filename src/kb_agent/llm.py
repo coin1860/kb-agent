@@ -40,6 +40,37 @@ class LLMClient:
             print(f"LLM Error: {e}")
             return "Error generating response."
 
+    def stream_chat_completion(self, messages: list, temperature: float = 0.2, on_stream=None) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                stream=True
+            )
+            
+            full_response = []
+            buf = ""
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    full_response.append(token)
+                    if on_stream:
+                        buf += token
+                        if "\n" in buf:
+                            lines = buf.split("\n")
+                            for line in lines[:-1]:
+                                on_stream(line + "\n")
+                            buf = lines[-1]
+                            
+            if on_stream and buf:
+                on_stream(buf)
+                
+            return "".join(full_response)
+        except Exception as e:
+            print(f"LLM Stream Error: {e}")
+            return "Error generating response."
+
     def generate_summary(self, content: str) -> str:
         """Specific helper for generating summaries, with Map-Reduce for large docs."""
         if len(content) <= 4000:

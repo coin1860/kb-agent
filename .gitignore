@@ -24,6 +24,8 @@ source/
 archive/
 logs/
 .llm_server.pid
+llama_server.pid
+llama_server.log
 
 # Ensure documentation is tracked
 !docs/

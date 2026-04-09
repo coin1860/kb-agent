@@ -1317,8 +1317,14 @@ class KBAgentApp(App):
                 return
 
             context = f"Jira Issue: {issue['id']}\nSummary: {issue['title']}\n\n{issue['content']}"
-            answer = self.engine.answer_from_context(context, query, history=self.chat_history)
-            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            
+            def on_stream(token):
+                self.call_from_thread(self._write_stream_token, log, token)
+                
+            stream_start_line = len(log.lines)
+            answer = self.engine.answer_from_context(context, query, on_stream=on_stream, history=self.chat_history)
+            self.call_from_thread(self._replace_stream_with_markdown, log, stream_start_line, answer)
+            
             self.chat_history.append({"role": "user", "content": f"/jira {jira_id} {query}"})
             self.chat_history.append({"role": "assistant", "content": answer})
         except Exception as e:
@@ -1350,8 +1356,14 @@ class KBAgentApp(App):
                 return
 
             context = f"Confluence Page: {page['title']}\nID: {page['id']}\n\n{page['content']}"
-            answer = self.engine.answer_from_context(context, query, history=self.chat_history)
-            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            
+            def on_stream(token):
+                self.call_from_thread(self._write_stream_token, log, token)
+                
+            stream_start_line = len(log.lines)
+            answer = self.engine.answer_from_context(context, query, on_stream=on_stream, history=self.chat_history)
+            self.call_from_thread(self._replace_stream_with_markdown, log, stream_start_line, answer)
+            
             self.chat_history.append({"role": "user", "content": f"/confluence {page_id} {query}"})
             self.chat_history.append({"role": "assistant", "content": answer})
         except Exception as e:
@@ -1380,8 +1392,13 @@ class KBAgentApp(App):
                 self.call_from_thread(log.write, f"[red]✗ File {filename} not found in index directory.[/red]")
                 return
 
-            answer = self.engine.answer_from_context(content, query, history=self.chat_history)
-            self.call_from_thread(log.write, Padding(Markdown(answer), (0, 0, 0, 2)))
+            def on_stream(token):
+                self.call_from_thread(self._write_stream_token, log, token)
+                
+            stream_start_line = len(log.lines)
+            answer = self.engine.answer_from_context(content, query, on_stream=on_stream, history=self.chat_history)
+            self.call_from_thread(self._replace_stream_with_markdown, log, stream_start_line, answer)
+            
             self.chat_history.append({"role": "user", "content": f"/file {filename} {query}"})
             self.chat_history.append({"role": "assistant", "content": answer})
         except Exception as e:
@@ -1547,7 +1564,7 @@ class KBAgentApp(App):
             
         def on_stream(token):
             # Token here is typically a full line buffered by _stream_and_track
-            self.call_from_thread(log.write, Padding(token.strip("\n"), (0, 0, 0, 2)))
+            self.call_from_thread(self._write_stream_token, log, token)
 
         self.call_from_thread(self._refresh_status, "thinking")
         self.call_from_thread(log.write, "")
@@ -1615,18 +1632,29 @@ class KBAgentApp(App):
             self.call_from_thread(log.write, f"\n[red]✗ Error: {e}[/red]")
             self.call_from_thread(self._refresh_status, "error", str(e))
 
+    def _write_stream_token(self, log, token: str):
+        """Write a streaming token. Auto-scrolls only if already at the bottom."""
+        is_at_bottom = log.scroll_y >= max(0, log.max_scroll_y - 1)
+        log.write(Padding(token.strip("\n"), (0, 0, 0, 2)), scroll_end=is_at_bottom)
+
     def _replace_stream_with_markdown(self, log, start_line: int, markdown_text: str):
         """Replaces the streamed lines in a RichLog with a single Markdown renderable."""
         try:
+            is_at_bottom = log.scroll_y >= max(0, log.max_scroll_y - 1)
+            old_scroll = log.scroll_y
+            
             # Delete purely the streamed lines
             del log.lines[start_line:]
             # Clear text cache so sizes adjust
             log._line_cache.clear()
             log._deferred_renders.clear()
             # Rewrite as markdown
-            log.write(Padding(Markdown(markdown_text), (0, 0, 0, 2)))
+            log.write(Padding(Markdown(markdown_text), (0, 0, 0, 2)), scroll_end=is_at_bottom)
             # Force update layouts
             log.refresh()
+            
+            if not is_at_bottom:
+                log.scroll_y = old_scroll
         except Exception as e:
             # Fallback if internal API changes
             log.write(Padding(Markdown(markdown_text), (0, 0, 0, 2)))

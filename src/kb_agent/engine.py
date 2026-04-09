@@ -92,7 +92,8 @@ class Engine:
             messages = [{"role": "system", "content": "You are a helpful assistant."}]
             messages.extend(history)
             messages.append({"role": "user", "content": user_query})
-            raw_response = self.llm.chat_completion(messages)
+            raw_response = self.llm.stream_chat_completion(messages, on_stream=on_stream)
+            raw_response = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL).strip()
             log_llm_response(user_query, raw_response)
             return Security.mask_sensitive_data(raw_response), []
 
@@ -151,6 +152,7 @@ class Engine:
         context_text: str,
         user_query: str,
         _status=None,
+        on_stream=None,
         history: List[Dict[str, str]] = None,
     ) -> str:
         """
@@ -177,7 +179,8 @@ class Engine:
         messages.extend(history)
         messages.append({"role": "user", "content": user_prompt})
 
-        raw_response = self.llm.chat_completion(messages)
+        raw_response = self.llm.stream_chat_completion(messages, on_stream=on_stream)
+        raw_response = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL).strip()
         log_llm_response(user_prompt, raw_response)
         return Security.mask_sensitive_data(raw_response)
 
@@ -190,6 +193,7 @@ class Engine:
         user_query: str,
         urls: List[str],
         _status,
+        on_stream=None,
         mode: str = "knowledge_base",
         history: List[Dict[str, str]] = None,
     ) -> tuple[str, list[dict[str, Any]]]:
@@ -220,7 +224,7 @@ class Engine:
         if not question:
             question = "Please summarize the content from the provided URL(s)."
 
-        answer = self.answer_from_context(full_context, question, _status=_status, history=history)
+        answer = self.answer_from_context(full_context, question, _status=_status, on_stream=on_stream, history=history)
         return answer, []
 
     def index_resource(self, url_or_id: str, on_status=None) -> str:
