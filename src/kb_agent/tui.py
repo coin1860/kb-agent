@@ -60,6 +60,7 @@ SETTINGS_CATEGORIES = [
     ("llm", "🤖  LLM", "API Key, Base URL, Model, Embeddings"),
     ("rag", "🔍  RAG", "Iterations, Score Threshold, Chunking"),
     ("atlassian", "🔗  Atlassian", "Jira & Confluence URLs and Tokens"),
+    ("gaip", "🏦  GAIP Proxy", "HSBC Group AI Platform proxy"),
     ("general", "⚙️   General", "Data Folder, Debug Mode"),
 ]
 
@@ -223,6 +224,8 @@ class SettingsDetailScreen(ModalScreen[bool]):
                 yield from self._compose_rag()
             elif self.category == "atlassian":
                 yield from self._compose_atlassian()
+            elif self.category == "gaip":
+                yield from self._compose_gaip()
             elif self.category == "general":
                 yield from self._compose_general()
 
@@ -294,6 +297,25 @@ class SettingsDetailScreen(ModalScreen[bool]):
         yield Input(placeholder="https://confluence.company.com", value=conf_url, id="confluence_url", classes="settings-input")
         yield Label("Confluence Token (PAT)", classes="settings-label", id="lbl-confluence-token")
         yield Input(placeholder="...", value=conf_token, password=True, id="confluence_token", classes="settings-input")
+
+    def _compose_gaip(self):
+        s = config.settings
+        enabled = str(s.gaip_proxy_enabled) if s and s.gaip_proxy_enabled is not None else "False"
+        endpoint = s.gaip_api_endpoint if s and s.gaip_api_endpoint else ""
+        user_id = s.gaip_user_id if s and s.gaip_user_id else ""
+        am_token = s.gaip_am_token.get_secret_value() if s and s.gaip_am_token else ""
+        port = str(s.gaip_proxy_port) if s and s.gaip_proxy_port is not None else "7999"
+
+        yield Label("Enable GAIP Proxy", classes="settings-label", id="lbl-gaip-enabled")
+        yield Input(placeholder="True / False", value=enabled, id="gaip_proxy_enabled", classes="settings-input")
+        yield Label("GAIP API Endpoint", classes="settings-label", id="lbl-gaip-endpoint")
+        yield Input(placeholder="https://gaip-api-uat.hsbc-...com/v1", value=endpoint, id="gaip_api_endpoint", classes="settings-input")
+        yield Label("User ID", classes="settings-label", id="lbl-gaip-user-id")
+        yield Input(placeholder="UCXXXXXXX", value=user_id, id="gaip_user_id", classes="settings-input")
+        yield Label("AM Token (JWT)", classes="settings-label", id="lbl-gaip-am-token")
+        yield Input(placeholder="Your 30-min AMToken", value=am_token, password=True, id="gaip_am_token", classes="settings-input")
+        yield Label("Proxy Port", classes="settings-label", id="lbl-gaip-port")
+        yield Input(placeholder="7999", value=port, id="gaip_proxy_port", classes="settings-input")
 
     def _compose_general(self):
         s = config.settings
@@ -400,6 +422,41 @@ class SettingsDetailScreen(ModalScreen[bool]):
                 "confluence_url": conf_url or None,
                 "confluence_token": conf_token or None,
             }
+
+        elif self.category == "gaip":
+            gaip_enabled_raw = self.query_one("#gaip_proxy_enabled").value.strip().lower()
+            gaip_enabled = gaip_enabled_raw in ("true", "1", "yes", "t", "y")
+            gaip_endpoint = self.query_one("#gaip_api_endpoint").value.strip()
+            gaip_user_id = self.query_one("#gaip_user_id").value.strip()
+            gaip_am_token = self.query_one("#gaip_am_token").value.strip()
+            gaip_port_raw = self.query_one("#gaip_proxy_port").value.strip() or "7999"
+            try:
+                gaip_port = int(gaip_port_raw)
+            except ValueError:
+                gaip_port = 7999
+
+            if gaip_enabled and (not gaip_endpoint or not gaip_user_id or not gaip_am_token):
+                self.notify("GAIP Proxy requires Endpoint, User ID and AM Token!", severity="error")
+                return
+
+            updates = {
+                "gaip_proxy_enabled": gaip_enabled,
+                "gaip_api_endpoint": gaip_endpoint or None,
+                "gaip_user_id": gaip_user_id or None,
+                "gaip_am_token": gaip_am_token or None,
+                "gaip_proxy_port": gaip_port,
+            }
+
+            # When enabling GAIP proxy, point LLM + embedding URLs at the local proxy
+            if gaip_enabled:
+                proxy_base = f"http://localhost:{gaip_port}/v1"
+                updates["llm_base_url"] = proxy_base
+                updates["embedding_url"] = proxy_base
+                self.notify(
+                    f"LLM & Embedding URLs set to {proxy_base}",
+                    severity="information",
+                    timeout=5.0,
+                )
 
         elif self.category == "general":
             data_folder = self.query_one("#data_folder").value.strip()

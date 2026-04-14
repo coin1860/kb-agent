@@ -99,10 +99,18 @@ def main():
     if args.command == "index":
         run_indexing()
     else:
+        # Start GAIP proxy if enabled
+        from kb_agent.gaip_proxy import maybe_start_gaip_proxy
+        proxy = maybe_start_gaip_proxy(config.settings)
+
         # Run TUI
         from kb_agent.tui import KBAgentApp
         app = KBAgentApp()
-        app.run()
+        try:
+            app.run()
+        finally:
+            if proxy:
+                proxy.stop()
 
 if __name__ == "__main__":
     main()

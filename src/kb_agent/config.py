@@ -52,6 +52,13 @@ class Settings(BaseModel):
     http_proxy: Optional[HttpUrl] = Field(None, description="HTTP Proxy URL")
     https_proxy: Optional[HttpUrl] = Field(None, description="HTTPS Proxy URL")
 
+    # GAIP (Group AI Platform) proxy
+    gaip_proxy_enabled: Optional[bool] = Field(False, description="Enable HSBC GAIP proxy on localhost")
+    gaip_api_endpoint: Optional[str] = Field(None, description="GAIP API base URL (e.g. https://gaip-api-uat.hsbc-...com/v1)")
+    gaip_user_id: Optional[str] = Field(None, description="GAIP user ID in format UCXXXXXXX")
+    gaip_am_token: Optional[SecretStr] = Field(None, description="AMToken for Internal Staff Account Authentication (30-min JWT)")
+    gaip_proxy_port: Optional[int] = Field(7999, description="Local port for the GAIP proxy server (default: 7999)")
+
     # External Services
     jira_url: Optional[HttpUrl] = Field(None, description="Jira Instance URL")
     jira_token: Optional[SecretStr] = Field(None, description="Jira Personal Access Token / API Token")

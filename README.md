@@ -34,6 +34,7 @@ Designed for **high-security banking environments**, it provides traceability, a
 * **Cross-Encoder Reranking**: Optional secondary reranking using `bge-reranker-v2-m3` (GGUF) to prioritize the most relevant chunks from 20+ candidates down to the top 3.
 * **Atlassian Smart Cache**: Persistent local cache for Jira and Confluence data, including automatic subtask summary archival to minimize API latency.
 * **Interactive Source Citations**: Answers include clickable references; click to view the full source chunk in a modal window.
+* **Banking Proxy (GAIP)**: Integrated support for HSBC Group AI Platform authentication (AMToken) via a local secure proxy on `:7999`.
 * **Anti-Hallucination**: The LLM is strictly forbidden from using its own parametric knowledge. All answers must come from retrieved evidence or conversation history.
 * **Local BGE-M3 Embeddings**: High-density vector embeddings using `BAAI/bge-m3` with 8192 context support and optimized CLS-pooling for Apple M-series silicon.
 * **Recursive Reasoning Loop**: `Analyze → Plan → Execute → Rerank → Grade → Reflect → (loop or answer)` with a configurable iteration cap (default 3).
@@ -219,9 +220,35 @@ Settings are persisted to `kb-agent.json` automatically.
 | Category | Fields |
 |---|---|
 | **LLM** | API Key, Base URL, Model, Embedding URL, Embedding Model |
+| **GAIP Proxy** | Enable Proxy, GAIP Endpoint, User ID, AM Token, Proxy Port |
 | **RAG** | Max Iterations, Vector Score Threshold, Chunk Max Chars, Chunk Overlap Chars |
 | **Atlassian** | Jira URL, Jira Token, Confluence URL, Confluence Token |
 | **General** | Data Folder, Debug Mode |
+
+---
+
+## 🏦 GAIP Proxy Service
+
+The **GAIP Proxy** is a local service that provides compatibility with the HSBC Group AI Platform. It acts as an OpenAI-compatible bridge, handling internal staff authentication (AMToken) and request translation.
+
+### 1. Integrated Usage (Recommended)
+Launch the TUI with `kb-agent`, open settings (`Ctrl+S`), and configure the **GAIP Proxy** category. Once enabled, the proxy starts automatically with the app, and LLM/Embedding URLs are redirected to `http://localhost:7999/v1`.
+
+### 2. Standalone Usage
+You can run the proxy independently for use with other AI tools or projects:
+
+```bash
+python3 -m kb_agent.gaip_proxy \
+    --endpoint "https://gaip-api-uat.hsbc...com/v1" \
+    --user-id "UCXXXXXXX" \
+    --am-token "YOUR_AM_TOKEN" \
+    --port 7999
+```
+
+**Features:**
+*   **Token Hot-Refresh**: Re-reads the token from `kb-agent.json` on every request.
+*   **Streaming SSE**: Full support for real-time model output.
+*   **Security**: Injects required HSBC headers and correlation IDs automatically.
 
 ---
 

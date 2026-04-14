@@ -119,6 +119,10 @@ def main(
     else:
         effective_data_folder = skills_path.parent
 
+    # Start GAIP proxy if enabled
+    from kb_agent.gaip_proxy import maybe_start_gaip_proxy
+    proxy = maybe_start_gaip_proxy(settings)
+
     shell = SkillShell(
         skills=skills,
         output_path=output_path,
@@ -128,7 +132,11 @@ def main(
         input_path=input_path,
         temp_path=temp_path,
     )
-    shell.start(effective_data_folder)
+    try:
+        shell.start(effective_data_folder)
+    finally:
+        if proxy:
+            proxy.stop()
 
 
 if __name__ == "__main__":
